@@ -181,6 +181,17 @@ interpolation (`lerp` + shortest-path angle lerp) like Pegasus.
   (approach, spring off a lee quay, …), touch controls, recordings/replays
   (the Pegasus hybrid format), scoring.
 
+## License
+GPL-3.0-or-later (deliberate choice, 2026-08-02, formalising the field the
+Cargo.tomls carried from the start). Canonical GPLv3 text in `LICENSE`;
+both Cargo.toml `license` fields must stay `"GPL-3.0-or-later"`. Because
+GPL makes later relicensing need every contributor's consent, contributors
+sign the lightweight CLA in `CLA.md` (copyright stays theirs; the project
+gets a broad license incl. relicensing rights) — agreement is a one-line
+PR statement or a signature added to CLA.md, per its §6. The vendored
+`mq_js_bundle.js` is MIT OR Apache-2.0 (GPL-compatible) and carries a
+required attribution header — keep it when replacing the bundle.
+
 ## Git workflow
 - Development branch: `claude/harbour-sim-boilerplate-j8j8lj` (current).
 - Same rules as Pegasus: curate branches before rebase-merging to `main`;

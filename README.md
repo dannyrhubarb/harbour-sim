@@ -51,3 +51,23 @@ publishes to GitHub Pages. Every PR gets its own preview at `pr-<n>/`.
 One-time repo setup: **Settings → Pages → Source = "GitHub Actions"**.
 
 See `CLAUDE.md` for the architecture and pipeline details.
+
+## License
+
+Licensed under the GNU General Public License, version 3 or (at your
+option) any later version — see [LICENSE](LICENSE) or
+https://www.gnu.org/licenses/gpl-3.0.html.
+
+The vendored `mq_js_bundle.js` is from the
+[miniquad](https://github.com/not-fl3/miniquad) /
+[quad-snd](https://github.com/not-fl3/quad-snd) projects, MIT OR
+Apache-2.0 (GPL-compatible) — see the notice at the top of that file.
+
+### Contribution
+
+Contributions are welcome and require agreeing to the project's
+Contributor License Agreement — see [CLA.md](CLA.md). In short: you keep
+the copyright to your work and license it to the project broadly enough
+that the maintainers can relicense later without tracking down every
+past contributor. Agreeing is a one-line statement in your first pull
+request.
