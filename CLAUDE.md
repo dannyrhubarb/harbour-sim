@@ -74,9 +74,19 @@ icons + revision injection; `.github/actions/sync-pages-branch` = commit into
   - `sim-core/src/sim.rs` — `Sim` (Rapier world: quay + basin walls, the
     boat), `Env` (wind/current), all physics constants, harbour geometry
     constants, unit tests.
+  - `sim-core/src/keel.rs` — `KeelProfile` (piecewise-linear underwater
+    lateral-area-per-length curve along the hull) and `KeelDerived` (area,
+    centre of lateral resistance, yaw damping integral — derived from the
+    curve by integration, see Simulation model below).
 - `src/main.rs` — macroquad frontend: input, fixed-timestep loop with render
   interpolation, top-down rendering (water/ripples, quay, breakwaters, boat),
-  HUD (wind/current indicators, SOG readout, key help).
+  HUD (wind/current indicators, SOG readout, key help), keel design editor
+  overlay (`K`).
+- `src/keel_editor.rs` — in-app editor for `KeelProfile`: drag a fixed-grid
+  bar chart to paint the underwater area distribution, two presets (fin/long
+  keel), live-derived readout, Apply respawns the boat via
+  `Sim::new_with_keel`. Frontend-only — hands a plain `KeelProfile` value to
+  sim-core, never reaches into physics directly.
 - `index.html` — web wrapper: boot guard (standalone script ahead of the
   bundle that paints script errors on screen), loading overlay,
   `__GIT_REVISION__` placeholder (deploy-time sed → wasm `?v=` cache-buster).
@@ -128,10 +138,28 @@ interpolation (`lerp` + shortest-path angle lerp) like Pegasus.
   speed), so all drag lives in `tick`, relative to the water, and the body's
   Rapier damping is 0.
 - **Force application points create the characteristic behaviours**: lateral
-  water force acts slightly AFT of centre (`WATER_CLR_OFFSET < 0`, keel/skeg
-  → weathervanes bow-into-current); lateral wind force slightly FORWARD
-  (`WIND_CENTER_OFFSET > 0`, bow windage → the bow falls off downwind).
-  Tune behaviour there, not with fudge torques.
+  wind force acts slightly FORWARD of centre (`WIND_CENTER_OFFSET > 0`, bow
+  windage → the bow falls off downwind). Tune behaviour there, not with
+  fudge torques.
+- **Keel profile (`sim-core/src/keel.rs`)**: the lateral water force's lever
+  arm and the yaw damping coefficient used to be two independently
+  hand-tuned constants (`WATER_CLR_OFFSET`, `C_YAW_Q`) — but they're both
+  moments of the *same* physical thing, the underwater lateral-area
+  distribution along the hull, so tuning them separately could produce a
+  combination no real keel shape would give (e.g. a fin keel's small lever
+  arm paired with a full keel's yaw damping). `KeelProfile` (piecewise-linear
+  area-per-length vs. hull position) is now the single source of truth:
+  `KeelProfile::derive()` integrates it (trapezoidal rule) into
+  `KeelDerived { area, clr_offset, cubic_moment }`, stored on `Sim` and used
+  in `tick` in place of the old constants. The physical reasoning: a strip
+  at distance `x` from the pivot sweeps sideways at `w·x` during yaw, and
+  drag is quadratic in speed, so its torque contribution scales as `x³` —
+  concentrating area near the pivot (fin keel) trades away yaw damping much
+  faster than it trades away total area, which is *why* fin keels spin
+  freely and full keels don't. `Sim::new()` uses `KeelProfile::default_workboat()`
+  (hand-tuned close to, not identical to, the legacy constants);
+  `Sim::new_with_keel(&profile)` takes any other profile — used by the
+  keel editor.
 - **Determinism rules (inherited verbatim from Pegasus)**: fresh `Sim` per
   run — never reuse one across runs (Rapier handle numbering / warm-start
   caches); all forces inside `tick` only; no wall clock, no `gen_range`, no
@@ -172,14 +200,18 @@ interpolation (`lerp` + shortest-path angle lerp) like Pegasus.
   `get_time()`); nothing cosmetic may feed back into the sim.
 - Controls: touch/mouse = drag the dials + RESET button; keyboard = ←/→
   wind dir, ↑/↓ wind speed, A/D current dir, W/S current speed, R reset
-  (reset = `Sim::new()`, never an in-place teleport; env is kept).
+  (reset = `respawn(&keel_profile)`, a fresh `Sim::new_with_keel`, never an
+  in-place teleport; env is kept), K keel design editor (freezes physics —
+  all input and the physics tick, not just rendering — while open; see
+  `src/keel_editor.rs`).
 
 ## Roadmap (agreed direction, not yet built)
 - **Ropes**: placeable mooring lines (bow/stern/springs) — each a constraint
   or spring force between a hull fairlead and a quay bollard, applied inside
   `tick` from a future `InputState`. Then: engine/rudder, scenarios
-  (approach, spring off a lee quay, …), touch controls, recordings/replays
-  (the Pegasus hybrid format), scoring.
+  (approach, spring off a lee quay, …), recordings/replays (the Pegasus
+  hybrid format), scoring. (Touch controls are done — see Frontend
+  conventions above.)
 
 ## License
 GPL-3.0-or-later (deliberate choice, 2026-08-02, formalising the field the
@@ -193,7 +225,7 @@ PR statement or a signature added to CLA.md, per its §6. The vendored
 required attribution header — keep it when replacing the bundle.
 
 ## Git workflow
-- Development branch: `claude/harbour-sim-boilerplate-j8j8lj` (current).
+- Development branch: `claude/harbour-sim-feature-aokq29` (current).
 - Same rules as Pegasus: curate branches before rebase-merging to `main`;
   the wasm binary is **not tracked** (gitignored) — deploy builds it from
   source; `git fetch origin main && git rebase origin/main` before PRs.

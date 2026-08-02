@@ -12,6 +12,7 @@
 //! (unit-tested), which is what will make recordings/replays possible later
 //! exactly like Pegasus.
 
+use crate::keel::{KeelDerived, KeelProfile};
 use glam::Vec2;
 use rapier2d::prelude::*;
 
@@ -61,10 +62,11 @@ const HULL_DENSITY: f32 = 200.0;
 const RHO_AIR: f32 = 1.2;
 const RHO_WATER: f32 = 1025.0;
 
-// Projected areas (m²): underwater lateral plane / frontal, and windage
-// lateral / frontal. Lateral >> frontal is what makes a hull slide forward
-// easily but resist drifting sideways.
-const WATER_AREA_LAT: f32 = 12.0; // ~12 m waterline × ~1 m draught
+// Projected areas (m²): underwater frontal, and windage lateral / frontal.
+// The underwater LATERAL area isn't a flat constant any more — it, its
+// lever arm, and the yaw damping coefficient are all derived together from
+// a `KeelProfile` (see keel.rs), since they're moments of the same
+// underlying area distribution along the hull.
 const WATER_AREA_FRONT: f32 = 3.0;
 const WIND_AREA_LAT: f32 = 18.0; // hull side + superstructure above water
 const WIND_AREA_FRONT: f32 = 7.0;
@@ -75,10 +77,6 @@ const CD_WATER_FRONT: f32 = 0.5;
 const CD_AIR_LAT: f32 = 1.0;
 const CD_AIR_FRONT: f32 = 0.7;
 
-/// Quadratic yaw damping (N·m per (rad/s)²): the water resists the hull
-/// sweeping around its own axis.
-const C_YAW_Q: f32 = 400_000.0;
-
 // Linear drag terms, also relative to the water. Quadratic drag vanishes at
 // low speed, so on its own the boat would creep forever; a linear term makes
 // it converge — to a stop in still water, to the current's own velocity in a
@@ -88,10 +86,6 @@ const K_LIN_SURGE: f32 = 200.0; // N per m/s
 const K_LIN_SWAY: f32 = 1500.0;
 const K_LIN_YAW: f32 = 50_000.0; // N·m per rad/s
 
-/// Where the lateral WATER force acts, forward of the centre (m). Slightly
-/// aft (negative) — keel/skeg effect — so a boat in a current tends to
-/// weathervane bow-into-current.
-const WATER_CLR_OFFSET: f32 = -0.6;
 /// Where the lateral WIND force acts, forward of the centre (m). Slightly
 /// forward — high bow / foredeck windage — so the bow blows off downwind,
 /// the familiar behaviour of a motorboat lying still in a breeze.
@@ -161,6 +155,9 @@ pub struct Sim {
     integration_params: IntegrationParameters,
     gravity: Vector<f32>,
     boat: RigidBodyHandle,
+    /// Underwater lateral-area moments (area, CLR lever arm, yaw damping
+    /// integral), derived once from a `KeelProfile` at construction.
+    keel: KeelDerived,
     /// Ticks advanced since spawn.
     pub ticks: u64,
 }
@@ -172,7 +169,17 @@ impl Default for Sim {
 }
 
 impl Sim {
+    /// A boat with the default workboat keel profile (skeg + rudder).
     pub fn new() -> Sim {
+        Self::new_with_keel(&KeelProfile::default_workboat())
+    }
+
+    /// A boat whose underwater lateral-area distribution — and therefore
+    /// its centre of lateral resistance and yaw damping — comes from
+    /// `profile` instead of the default. Used by the keel editor to try
+    /// different hull shapes.
+    pub fn new_with_keel(profile: &KeelProfile) -> Sim {
+        let keel = profile.derive();
         let mut bodies = RigidBodySet::new();
         let mut colliders = ColliderSet::new();
 
@@ -245,8 +252,16 @@ impl Sim {
             },
             gravity: vector![0.0, 0.0],
             boat,
+            keel,
             ticks: 0,
         }
+    }
+
+    /// The underwater lateral-area moments this boat is currently using
+    /// (area, CLR lever arm, yaw damping integral) — exposed read-only so
+    /// the frontend can show what a profile actually produced.
+    pub fn keel(&self) -> KeelDerived {
+        self.keel
     }
 
     /// Boat pose: (position, heading). Heading is the Rapier rotation angle;
@@ -290,16 +305,21 @@ impl Sim {
             * (0.5 * RHO_WATER * CD_WATER_FRONT * WATER_AREA_FRONT * surge * surge.abs()
                 + K_LIN_SURGE * surge);
         let f_sway = -side
-            * (0.5 * RHO_WATER * CD_WATER_LAT * WATER_AREA_LAT * sway * sway.abs()
+            * (0.5 * RHO_WATER * CD_WATER_LAT * self.keel.area * sway * sway.abs()
                 + K_LIN_SWAY * sway);
         // Surge drag acts through the centre; the lateral force acts at the
-        // centre of lateral resistance, slightly aft => weathervaning.
+        // keel profile's centre of lateral resistance (see keel.rs) —
+        // aft-of-centre for a typical skeg/rudder boat => weathervaning.
         rb.add_force(vector![f_surge.x, f_surge.y], true);
-        let clr = pos + fwd * WATER_CLR_OFFSET;
+        let clr = pos + fwd * self.keel.clr_offset;
         rb.add_force_at_point(vector![f_sway.x, f_sway.y], point![clr.x, clr.y], true);
 
-        // Yaw drag.
-        rb.add_torque(-(C_YAW_Q * w * w.abs() + K_LIN_YAW * w), true);
+        // Yaw drag: the same lateral-area profile, but its cubic moment —
+        // the water resists the hull sweeping around its own axis more than
+        // it resists straight sway, because points far from the pivot move
+        // faster during rotation and drag is quadratic in speed.
+        let c_yaw_q = 0.5 * RHO_WATER * CD_WATER_LAT * self.keel.cubic_moment;
+        rb.add_torque(-(c_yaw_q * w * w.abs() + K_LIN_YAW * w), true);
 
         // --- Wind load: air moving relative to the hull/superstructure.
         let ar = env.wind_vel() - v;
