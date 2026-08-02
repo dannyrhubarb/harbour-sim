@@ -517,9 +517,12 @@ async fn main() {
             &format!("CURR {:.1} m/s to {:03.0}", env.current_speed, env.current_to_deg),
         );
 
-        // Boat speed-over-ground, centred between the dials.
+        // Boat speed-over-ground and speed-through-water, centred between
+        // the dials. STW is SOG relative to the current, not the wind —
+        // the reading a paddlewheel/pitot log would give.
         let (v, _) = sim.boat_vel();
-        let sog = format!("SOG {:.2} m/s", v.length());
+        let stw = (v - env.current_vel()).length();
+        let sog = format!("SOG {:.2} m/s   STW {:.2} m/s", v.length(), stw);
         let sd = measure_text(&sog, None, fs as u16, 1.0);
         draw_text(&sog, sw * 0.5 - sd.width * 0.5, sa_t + margin + fs, fs, text);
 
