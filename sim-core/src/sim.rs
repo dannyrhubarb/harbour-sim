@@ -92,8 +92,29 @@ pub fn yaw_damping_coefficient(cubic_moment: f32) -> f32 {
 // stream (world-frame Rapier damping would instead fight the current and
 // hold the boat below water speed, so the drag lives here in the sim).
 const K_LIN_SURGE: f32 = 200.0; // N per m/s
-const K_LIN_SWAY: f32 = 1500.0;
-const K_LIN_YAW: f32 = 50_000.0; // N·m per rad/s
+
+// Sway and yaw's linear terms are NOT flat constants like surge's — sway and
+// yaw's quadratic terms are keel-profile-derived (`self.keel.area`,
+// `self.keel.cubic_moment`), so a flat linear floor would silently fall out
+// of proportion for any profile far from the one it was tuned against (an
+// extreme fin keel would keep a full keel's low-speed damping; an extreme
+// full keel would keep a fin keel's). Instead each is the SAME crossover
+// idea as `K_LIN_SURGE` — "below this speed, linear damping takes over from
+// quadratic" — expressed as a speed/rate and scaled by the profile's own
+// quadratic coefficient, so the crossover point stays put as the profile
+// changes instead of the absolute force. The crossover values themselves are
+// hand-picked to land close to (not identical to) the old flat 1500 N/(m/s)
+// and 50_000 N·m/(rad/s) this replaces, at the default profile.
+const SWAY_LIN_CROSSOVER_SPEED: f32 = 0.22; // m/s
+const YAW_LIN_CROSSOVER_RATE: f32 = 0.14; // rad/s
+
+fn k_lin_sway(area: f32) -> f32 {
+    0.5 * RHO_WATER * CD_WATER_LAT * area * SWAY_LIN_CROSSOVER_SPEED
+}
+
+fn k_lin_yaw(c_yaw_q: f32) -> f32 {
+    c_yaw_q * YAW_LIN_CROSSOVER_RATE
+}
 
 /// Where the lateral WIND force acts, forward of the centre (m). Slightly
 /// forward — high bow / foredeck windage — so the bow blows off downwind,
@@ -323,7 +344,7 @@ impl Sim {
                 + K_LIN_SURGE * surge);
         let f_sway = -side
             * (0.5 * RHO_WATER * CD_WATER_LAT * self.keel.area * sway * sway.abs()
-                + K_LIN_SWAY * sway);
+                + k_lin_sway(self.keel.area) * sway);
         // Surge drag acts through the centre; the lateral force acts at the
         // keel profile's centre of lateral resistance (see keel.rs) —
         // aft-of-centre for a typical skeg/rudder boat => weathervaning.
@@ -336,7 +357,7 @@ impl Sim {
         // it resists straight sway, because points far from the pivot move
         // faster during rotation and drag is quadratic in speed.
         let c_yaw_q = yaw_damping_coefficient(self.keel.cubic_moment);
-        rb.add_torque(-(c_yaw_q * w * w.abs() + K_LIN_YAW * w), true);
+        rb.add_torque(-(c_yaw_q * w * w.abs() + k_lin_yaw(c_yaw_q) * w), true);
 
         // Rotation-induced SIDE FORCE (the torque above's inseparable twin):
         // the strips resisting the spin don't pull symmetrically when the
