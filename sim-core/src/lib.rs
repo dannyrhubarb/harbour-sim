@@ -4,4 +4,5 @@
 // a pure function of its input stream so recordings/verification stay
 // possible later. See the determinism rules in CLAUDE.md.
 
+pub mod keel;
 pub mod sim;

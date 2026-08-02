@@ -11,11 +11,15 @@
 //! space with the drawing/mouse coordinates. HUD sizes below are therefore
 //! written directly in css px.
 
+use harbour_sim_core::keel::KeelProfile;
 use harbour_sim_core::sim::{
     BASIN_BOTTOM_Y, BASIN_HALF_W, Env, HULL_PTS, PHYSICS_DT, QUAY_DEPTH, QUAY_HALF_W, QUAY_Y, Sim,
 };
+use keel_editor::{EditorAction, EditorButtons, KeelEditor};
 use macroquad::prelude::*;
 use std::sync::atomic::{AtomicU32, Ordering};
+
+mod keel_editor;
 
 // Zoom bounds for the fill-screen camera: never show more than
 // VIEW_MAX_W × VIEW_MAX_H metres, never fewer than VIEW_MIN_W metres across.
@@ -66,6 +70,15 @@ fn window_conf() -> Conf {
     }
 }
 
+/// Fresh `Sim` + reset render-interpolation state, shared by the R-reset
+/// key and the keel editor's Apply — never mutate an existing `Sim` in
+/// place (determinism rule), always spawn a new one.
+fn respawn(profile: &KeelProfile) -> (Sim, Vec2, f32, Vec2, f32) {
+    let sim = Sim::new_with_keel(profile);
+    let (pos, heading) = sim.boat_pose();
+    (sim, pos, heading, pos, heading)
+}
+
 /// Shortest-path angle interpolation (for the render lerp across a tick).
 fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
     let mut d = (b - a) % std::f32::consts::TAU;
@@ -112,7 +125,9 @@ async fn main() {
     // synthesize a mouse press (= a phantom mouse dial-grab).
     simulate_mouse_with_touch(false);
 
-    let mut sim = Sim::new();
+    let mut keel_profile = KeelProfile::default_workboat();
+    let mut sim = Sim::new_with_keel(&keel_profile);
+    let mut editor = KeelEditor::new(&keel_profile);
     let mut env = Env {
         wind_from_deg: 315.0,
         wind_speed: 6.0,
@@ -141,7 +156,16 @@ async fn main() {
         let (sa_t, sa_l, sa_b, sa_r) = safe_area();
         let min_dim = sw.min(sh);
 
+        if is_key_pressed(KeyCode::K) {
+            if !editor.active {
+                editor.load(&keel_profile);
+            }
+            editor.active = !editor.active;
+        }
+
         // --- HUD layout (css px) -----------------------------------------
+        // Computed every frame regardless of editor state: the dials/reset
+        // button still render (frozen) behind the editor overlay.
         let margin = (min_dim * 0.02).clamp(8.0, 18.0);
         let dial_r = (min_dim * 0.11).clamp(34.0, 54.0);
         let fs = (min_dim * 0.035).clamp(12.0, 24.0);
@@ -164,122 +188,124 @@ async fn main() {
             reset_h,
         );
 
-        let mut do_reset = is_key_pressed(KeyCode::R);
+        if !editor.active {
+            let mut do_reset = is_key_pressed(KeyCode::R);
 
-        // --- Touch input: dial drags + reset taps ------------------------
-        let ts = touches();
-        let cur_ids: Vec<u64> = ts.iter().map(|t| t.id).collect();
-        for t in &ts {
-            let p = t.position / dpi; // physical → logical (see header note)
-            let fresh = !prev_touch_ids.contains(&t.id) || t.phase == TouchPhase::Started;
-            if fresh {
-                // A recycled id is a NEW finger: drop any stale claim first.
+            // --- Touch input: dial drags + reset taps ---------------------
+            let ts = touches();
+            let cur_ids: Vec<u64> = ts.iter().map(|t| t.id).collect();
+            for t in &ts {
+                let p = t.position / dpi; // physical → logical (see header note)
+                let fresh = !prev_touch_ids.contains(&t.id) || t.phase == TouchPhase::Started;
+                if fresh {
+                    // A recycled id is a NEW finger: drop any stale claim first.
+                    if wind_claim == Some(t.id) {
+                        wind_claim = None;
+                    }
+                    if current_claim == Some(t.id) {
+                        current_claim = None;
+                    }
+                    if wind_dial.hit(p) && wind_claim.is_none() {
+                        wind_claim = Some(t.id);
+                    } else if current_dial.hit(p) && current_claim.is_none() {
+                        current_claim = Some(t.id);
+                    } else if reset_rect.contains(p) {
+                        do_reset = true;
+                    }
+                }
                 if wind_claim == Some(t.id) {
-                    wind_claim = None;
-                }
-                if current_claim == Some(t.id) {
-                    current_claim = None;
-                }
-                if wind_dial.hit(p) && wind_claim.is_none() {
-                    wind_claim = Some(t.id);
-                } else if current_dial.hit(p) && current_claim.is_none() {
-                    current_claim = Some(t.id);
-                } else if reset_rect.contains(p) {
-                    do_reset = true;
-                }
-            }
-            if wind_claim == Some(t.id) {
-                let (to, frac) = wind_dial.value(p);
-                env.wind_from_deg = (to + 180.0).rem_euclid(360.0);
-                env.wind_speed = frac * WIND_MAX;
-            } else if current_claim == Some(t.id) {
-                let (to, frac) = current_dial.value(p);
-                env.current_to_deg = to;
-                env.current_speed = frac * CURRENT_MAX;
-            }
-        }
-        if wind_claim.is_some_and(|id| !cur_ids.contains(&id)) {
-            wind_claim = None;
-        }
-        if current_claim.is_some_and(|id| !cur_ids.contains(&id)) {
-            current_claim = None;
-        }
-        prev_touch_ids = cur_ids;
-
-        // --- Mouse input: same dials, same gesture -----------------------
-        let mp: Vec2 = mouse_position().into();
-        if is_mouse_button_pressed(MouseButton::Left) {
-            if wind_dial.hit(mp) {
-                mouse_claim = Some(0);
-            } else if current_dial.hit(mp) {
-                mouse_claim = Some(1);
-            } else if reset_rect.contains(mp) {
-                do_reset = true;
-            }
-        }
-        if is_mouse_button_down(MouseButton::Left) {
-            match mouse_claim {
-                Some(0) => {
-                    let (to, frac) = wind_dial.value(mp);
+                    let (to, frac) = wind_dial.value(p);
                     env.wind_from_deg = (to + 180.0).rem_euclid(360.0);
                     env.wind_speed = frac * WIND_MAX;
-                }
-                Some(1) => {
-                    let (to, frac) = current_dial.value(mp);
+                } else if current_claim == Some(t.id) {
+                    let (to, frac) = current_dial.value(p);
                     env.current_to_deg = to;
                     env.current_speed = frac * CURRENT_MAX;
                 }
-                _ => {}
             }
-        } else {
-            mouse_claim = None;
-        }
+            if wind_claim.is_some_and(|id| !cur_ids.contains(&id)) {
+                wind_claim = None;
+            }
+            if current_claim.is_some_and(|id| !cur_ids.contains(&id)) {
+                current_claim = None;
+            }
+            prev_touch_ids = cur_ids;
 
-        // --- Keyboard input ----------------------------------------------
-        if is_key_down(KeyCode::Left) {
-            env.wind_from_deg -= DIR_RATE * dt;
-        }
-        if is_key_down(KeyCode::Right) {
-            env.wind_from_deg += DIR_RATE * dt;
-        }
-        if is_key_down(KeyCode::Up) {
-            env.wind_speed = (env.wind_speed + WIND_RATE * dt).min(WIND_MAX);
-        }
-        if is_key_down(KeyCode::Down) {
-            env.wind_speed = (env.wind_speed - WIND_RATE * dt).max(0.0);
-        }
-        if is_key_down(KeyCode::A) {
-            env.current_to_deg -= DIR_RATE * dt;
-        }
-        if is_key_down(KeyCode::D) {
-            env.current_to_deg += DIR_RATE * dt;
-        }
-        if is_key_down(KeyCode::W) {
-            env.current_speed = (env.current_speed + CURRENT_RATE * dt).min(CURRENT_MAX);
-        }
-        if is_key_down(KeyCode::S) {
-            env.current_speed = (env.current_speed - CURRENT_RATE * dt).max(0.0);
-        }
-        env.wind_from_deg = env.wind_from_deg.rem_euclid(360.0);
-        env.current_to_deg = env.current_to_deg.rem_euclid(360.0);
+            // --- Mouse input: same dials, same gesture ---------------------
+            let mp: Vec2 = mouse_position().into();
+            if is_mouse_button_pressed(MouseButton::Left) {
+                if wind_dial.hit(mp) {
+                    mouse_claim = Some(0);
+                } else if current_dial.hit(mp) {
+                    mouse_claim = Some(1);
+                } else if reset_rect.contains(mp) {
+                    do_reset = true;
+                }
+            }
+            if is_mouse_button_down(MouseButton::Left) {
+                match mouse_claim {
+                    Some(0) => {
+                        let (to, frac) = wind_dial.value(mp);
+                        env.wind_from_deg = (to + 180.0).rem_euclid(360.0);
+                        env.wind_speed = frac * WIND_MAX;
+                    }
+                    Some(1) => {
+                        let (to, frac) = current_dial.value(mp);
+                        env.current_to_deg = to;
+                        env.current_speed = frac * CURRENT_MAX;
+                    }
+                    _ => {}
+                }
+            } else {
+                mouse_claim = None;
+            }
 
-        if do_reset {
-            // Fresh Sim per run — never reuse one (determinism rule).
-            sim = Sim::new();
-            (prev_pos, prev_heading) = sim.boat_pose();
-            (cur_pos, cur_heading) = (prev_pos, prev_heading);
-            accum = 0.0;
-        }
+            // --- Keyboard input ---------------------------------------------
+            if is_key_down(KeyCode::Left) {
+                env.wind_from_deg -= DIR_RATE * dt;
+            }
+            if is_key_down(KeyCode::Right) {
+                env.wind_from_deg += DIR_RATE * dt;
+            }
+            if is_key_down(KeyCode::Up) {
+                env.wind_speed = (env.wind_speed + WIND_RATE * dt).min(WIND_MAX);
+            }
+            if is_key_down(KeyCode::Down) {
+                env.wind_speed = (env.wind_speed - WIND_RATE * dt).max(0.0);
+            }
+            if is_key_down(KeyCode::A) {
+                env.current_to_deg -= DIR_RATE * dt;
+            }
+            if is_key_down(KeyCode::D) {
+                env.current_to_deg += DIR_RATE * dt;
+            }
+            if is_key_down(KeyCode::W) {
+                env.current_speed = (env.current_speed + CURRENT_RATE * dt).min(CURRENT_MAX);
+            }
+            if is_key_down(KeyCode::S) {
+                env.current_speed = (env.current_speed - CURRENT_RATE * dt).max(0.0);
+            }
+            env.wind_from_deg = env.wind_from_deg.rem_euclid(360.0);
+            env.current_to_deg = env.current_to_deg.rem_euclid(360.0);
 
-        // --- Fixed-timestep physics with render interpolation ------------
-        accum += dt;
-        while accum >= PHYSICS_DT {
-            prev_pos = cur_pos;
-            prev_heading = cur_heading;
-            sim.tick(&env);
-            (cur_pos, cur_heading) = sim.boat_pose();
-            accum -= PHYSICS_DT;
+            if do_reset {
+                // Fresh Sim per run — never reuse one (determinism rule).
+                (sim, prev_pos, prev_heading, cur_pos, cur_heading) = respawn(&keel_profile);
+                accum = 0.0;
+            }
+
+            // --- Fixed-timestep physics with render interpolation. ---------
+            accum += dt;
+            while accum >= PHYSICS_DT {
+                prev_pos = cur_pos;
+                prev_heading = cur_heading;
+                sim.tick(&env);
+                (cur_pos, cur_heading) = sim.boat_pose();
+                accum -= PHYSICS_DT;
+            }
         }
+        // Physics is frozen while the keel editor is open — the displayed
+        // pose just holds at whatever it last interpolated to.
         let alpha = accum / PHYSICS_DT;
         let pos = prev_pos.lerp(cur_pos, alpha);
         let heading = lerp_angle(prev_heading, cur_heading, alpha);
@@ -500,7 +526,7 @@ async fn main() {
         // arrow glyphs.
         let mut help: Vec<&str> = vec!["drag the dials to set wind & current"];
         if sw >= 700.0 {
-            help.push("keys: arrows = wind, A/D+W/S = current, R = reset");
+            help.push("keys: arrows = wind, A/D+W/S = current, R = reset, K = keel editor");
         }
         for (i, line) in help.iter().enumerate() {
             draw_text(
@@ -510,6 +536,37 @@ async fn main() {
                 fs * 0.8,
                 dim,
             );
+        }
+
+        // --- Keel design editor overlay -----------------------------------
+        if editor.active {
+            // The editor predates the touch HUD's min_dim/fs/margin-based
+            // css-px scaling; this is the same scale factor in that idiom,
+            // dpi-free like the rest of the new HUD (macroquad's high_dpi
+            // conf + logical measurement already handle that).
+            let ui = (min_dim / 980.0).clamp(0.5, 1.0);
+            let canvas = Rect::new(
+                sw * 0.5 - 300.0 * ui,
+                sh * 0.5 - 170.0 * ui,
+                600.0 * ui,
+                220.0 * ui,
+            );
+            let buttons = EditorButtons::under(canvas, ui);
+            match editor.update(canvas, buttons) {
+                EditorAction::Apply => {
+                    keel_profile = editor.profile();
+                    (sim, prev_pos, prev_heading, cur_pos, cur_heading) = respawn(&keel_profile);
+                    accum = 0.0;
+                    editor.active = false;
+                }
+                EditorAction::Cancel => {
+                    editor.active = false;
+                }
+                EditorAction::None => {}
+            }
+            if editor.active {
+                editor.draw(canvas, buttons, ui);
+            }
         }
 
         next_frame().await;

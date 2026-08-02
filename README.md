@@ -26,6 +26,7 @@ mooring.
 | A / D | Rotate current direction |
 | W / S | Current speed |
 | R | Reset the boat to its mooring |
+| K | Keel design editor |
 
 ## Build & run
 
