@@ -8,6 +8,7 @@
 //! outside a full respawn, keeping the "fresh Sim per run" determinism rule.
 
 use harbour_sim_core::keel::KeelProfile;
+use harbour_sim_core::sim::yaw_damping_coefficient;
 use macroquad::prelude::*;
 
 /// Fixed control-point x positions (hull-local metres, bow positive),
@@ -36,11 +37,15 @@ pub enum EditorAction {
 pub struct KeelEditor {
     pub active: bool,
     ys: [f32; EDIT_XS.len()],
+    /// Touch ids seen last frame — lets button taps use the same
+    /// fresh-touch detection as the HUD dials (see `update`).
+    prev_touch_ids: Vec<u64>,
 }
 
 impl KeelEditor {
     pub fn new(initial: &KeelProfile) -> Self {
-        let mut editor = KeelEditor { active: false, ys: [0.0; EDIT_XS.len()] };
+        let mut editor =
+            KeelEditor { active: false, ys: [0.0; EDIT_XS.len()], prev_touch_ids: Vec::new() };
         editor.load(initial);
         editor
     }
@@ -59,32 +64,77 @@ impl KeelEditor {
         }
     }
 
-    /// Handle mouse/keyboard input for one frame. `canvas` is the graph
-    /// area in screen pixels; `buttons` are the (fin, long, apply, cancel)
-    /// button rects, also in screen pixels.
+    /// Paint the column under `p` (screen px) if it falls inside `canvas`.
+    /// Shared by mouse-drag and touch-drag.
+    fn drag_at(&mut self, canvas: Rect, p: Vec2) {
+        if !canvas.contains(p) {
+            return;
+        }
+        let t = ((p.x - canvas.x) / canvas.w).clamp(0.0, 1.0);
+        let idx = (t * (EDIT_XS.len() - 1) as f32).round() as usize;
+        // The baseline (0 area) is the TOP of the canvas — this is a keel
+        // hanging below the hull, so more area reads as deeper (further
+        // down), like a real keel-profile sketch, not taller.
+        let value = ((p.y - canvas.y) / canvas.h * MAX_AREA_PER_LEN).clamp(0.0, MAX_AREA_PER_LEN);
+        self.ys[idx] = value;
+    }
+
+    /// A click/tap at `p` (screen px) on one of the four buttons, if any.
+    /// Shared by mouse-click and touch-tap.
+    fn button_at(&mut self, buttons: EditorButtons, p: Vec2) -> EditorAction {
+        if buttons.fin.contains(p) {
+            self.load(&KeelProfile::fin_keel());
+        } else if buttons.long.contains(p) {
+            self.load(&KeelProfile::long_keel());
+        } else if buttons.apply.contains(p) {
+            return EditorAction::Apply;
+        } else if buttons.cancel.contains(p) {
+            return EditorAction::Cancel;
+        }
+        EditorAction::None
+    }
+
+    /// Handle mouse/touch/keyboard input for one frame. `canvas` is the
+    /// graph area in screen pixels; `buttons` are the (fin, long, apply,
+    /// cancel) button rects, also in screen pixels.
     pub fn update(&mut self, canvas: Rect, buttons: EditorButtons) -> EditorAction {
         let (mx, my) = mouse_position();
-        if is_mouse_button_down(MouseButton::Left) && canvas.contains(vec2(mx, my)) {
-            let t = ((mx - canvas.x) / canvas.w).clamp(0.0, 1.0);
-            let idx = (t * (EDIT_XS.len() - 1) as f32).round() as usize;
-            // The baseline (0 area) is the TOP of the canvas — this is a
-            // keel hanging below the hull, so more area reads as deeper
-            // (further down), like a real keel-profile sketch, not taller.
-            let value =
-                ((my - canvas.y) / canvas.h * MAX_AREA_PER_LEN).clamp(0.0, MAX_AREA_PER_LEN);
-            self.ys[idx] = value;
+        if is_mouse_button_down(MouseButton::Left) {
+            self.drag_at(canvas, vec2(mx, my));
         }
         if is_mouse_button_pressed(MouseButton::Left) {
-            if buttons.fin.contains(vec2(mx, my)) {
-                self.load(&KeelProfile::fin_keel());
-            } else if buttons.long.contains(vec2(mx, my)) {
-                self.load(&KeelProfile::long_keel());
-            } else if buttons.apply.contains(vec2(mx, my)) {
-                return EditorAction::Apply;
-            } else if buttons.cancel.contains(vec2(mx, my)) {
-                return EditorAction::Cancel;
+            let action = self.button_at(buttons, vec2(mx, my));
+            if !matches!(action, EditorAction::None) {
+                return action;
             }
         }
+
+        // --- Touch input: same gestures as the mouse. The app disables
+        // touch→mouse synthesis (`simulate_mouse_with_touch(false)`, for
+        // the HUD dials) so this is the only path that makes the editor
+        // usable on an actual touchscreen.
+        let dpi = screen_dpi_scale();
+        let ts = touches();
+        let cur_ids: Vec<u64> = ts.iter().map(|t| t.id).collect();
+        let mut touch_action = EditorAction::None;
+        for t in &ts {
+            let p = t.position / dpi; // physical → logical px
+            self.drag_at(canvas, p);
+            // Only a FRESH touch taps a button — a finger held on Apply
+            // must not re-trigger it every frame it stays down.
+            let fresh = !self.prev_touch_ids.contains(&t.id) || t.phase == TouchPhase::Started;
+            if fresh {
+                let action = self.button_at(buttons, p);
+                if !matches!(action, EditorAction::None) {
+                    touch_action = action;
+                }
+            }
+        }
+        self.prev_touch_ids = cur_ids;
+        if !matches!(touch_action, EditorAction::None) {
+            return touch_action;
+        }
+
         if is_key_pressed(KeyCode::F) {
             self.load(&KeelProfile::fin_keel());
         }
@@ -208,7 +258,7 @@ impl KeelEditor {
         draw_text("CLR", clr_x + 4.0 * ui, canvas.y + 16.0 * ui, fs * 0.65, Color::from_rgba(255, 170, 60, 255));
 
         // Live readout.
-        let c_yaw_q = 0.5 * 1025.0 * 1.1 * derived.cubic_moment;
+        let c_yaw_q = yaw_damping_coefficient(derived.cubic_moment);
         draw_text(
             format!(
                 "area {:.1} m^2   CLR {:+.2} m   yaw damping {:.0} N*m/(rad/s)^2",
@@ -243,11 +293,14 @@ pub struct EditorButtons {
 }
 
 impl EditorButtons {
-    /// Lay the four buttons out under `canvas` in a row.
+    /// Lay the four buttons out under `canvas` in a row, sized to fill
+    /// exactly `canvas.w` — a fixed button width could overflow the canvas
+    /// (and the screen) on narrow viewports, working against the whole
+    /// point of having a touch-reachable editor.
     pub fn under(canvas: Rect, ui: f32) -> EditorButtons {
-        let bw = 150.0 * ui;
-        let bh = 40.0 * ui;
         let gap = 14.0 * ui;
+        let bw = (canvas.w - gap * 3.0) / 4.0;
+        let bh = 40.0 * ui;
         let y = canvas.y + canvas.h + 74.0 * ui;
         let x0 = canvas.x;
         EditorButtons {
