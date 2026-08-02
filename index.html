@@ -109,13 +109,48 @@
     }
     load("./harbour-sim.wasm" + (wasmRev.startsWith("__") ? "" : "?v=" + wasmRev));
 
-    // Fade the loading overlay once the wasm is running.
+    // Fade the loading overlay once the wasm is running, then start pushing
+    // safe-area insets (notch etc.) into the game.
     const loadPoll = setInterval(() => {
       if (typeof wasm_exports !== "undefined" && wasm_exports) {
         document.getElementById("loading").classList.add("off");
         clearInterval(loadPoll);
+        pushSafeArea();
       }
     }, 100);
+
+    // Safe-area insets → wasm (css px, used as-is by the game's HUD layout).
+    // A hidden probe element resolves env(safe-area-inset-*) (needs the
+    // viewport-fit=cover meta, present above); the bottom inset also folds
+    // in the floating browser toolbar via visualViewport, so controls stay
+    // above the URL bar. Everything feature-detected + try/caught — this
+    // must never break the game.
+    const saProbe = document.createElement("div");
+    saProbe.style.cssText =
+      "position:fixed;visibility:hidden;pointer-events:none;" +
+      "top:env(safe-area-inset-top);left:env(safe-area-inset-left);" +
+      "right:env(safe-area-inset-right);bottom:env(safe-area-inset-bottom);";
+    document.body.appendChild(saProbe);
+    function pushSafeArea() {
+      try {
+        if (typeof wasm_exports === "undefined" || !wasm_exports || !wasm_exports.set_safe_area) return;
+        const cs = getComputedStyle(saProbe);
+        const px = (v) => Math.max(0, parseFloat(v) || 0);
+        let bottom = px(cs.bottom);
+        const vv = window.visualViewport;
+        if (vv) {
+          // The canvas is 100vh and extends under a floating toolbar.
+          bottom = Math.max(bottom, window.innerHeight - vv.height - vv.offsetTop);
+        }
+        wasm_exports.set_safe_area(px(cs.top), px(cs.left), bottom, px(cs.right));
+      } catch (e) { /* never fatal */ }
+    }
+    window.addEventListener("resize", pushSafeArea);
+    window.addEventListener("orientationchange", () => setTimeout(pushSafeArea, 300));
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", pushSafeArea);
+      window.visualViewport.addEventListener("scroll", pushSafeArea);
+    }
   </script>
 </body>
 </html>

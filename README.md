@@ -12,6 +12,13 @@ Pages.
 
 ## Controls
 
+**Touch / mouse**: drag the two compass dials (top corners) — direction of
+the drag sets where the wind/current flows toward, distance from the centre
+sets the speed (centre = calm). The RESET button returns the boat to its
+mooring.
+
+**Keyboard**:
+
 | Keys | Effect |
 |------|--------|
 | ← / → | Rotate wind direction |

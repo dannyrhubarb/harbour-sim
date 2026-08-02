@@ -3,24 +3,60 @@
 //! Everything deterministic lives in `harbour-sim-core` (the `Sim`); this
 //! file is input gathering, the fixed-timestep loop, and rendering. Nothing
 //! here may mutate physics outside `Sim::tick` (the Pegasus rule).
+//!
+//! Units note (measured, and matching the Pegasus write-up): macroquad's
+//! `screen_width()/screen_height()` and `mouse_position()` are LOGICAL css
+//! px (physical / dpi), while `touches()` returns RAW PHYSICAL px — every
+//! touch position must be divided by `screen_dpi_scale()` before it shares
+//! space with the drawing/mouse coordinates. HUD sizes below are therefore
+//! written directly in css px.
 
 use harbour_sim_core::sim::{
     BASIN_BOTTOM_Y, BASIN_HALF_W, Env, HULL_PTS, PHYSICS_DT, QUAY_DEPTH, QUAY_HALF_W, QUAY_Y, Sim,
 };
 use macroquad::prelude::*;
+use std::sync::atomic::{AtomicU32, Ordering};
 
-// View rectangle (metres) the camera letterboxes into the window.
-const VIEW_W: f32 = 88.0;
-const VIEW_H: f32 = 46.0;
-const VIEW_CX: f32 = 0.0;
-const VIEW_CY: f32 = (QUAY_Y + QUAY_DEPTH + BASIN_BOTTOM_Y - 2.0) / 2.0;
+// Zoom bounds for the fill-screen camera: never show more than
+// VIEW_MAX_W × VIEW_MAX_H metres, never fewer than VIEW_MIN_W metres across.
+// The camera fills the window (cropping the other axis) and follows the
+// boat, clamped to the world rect — that's what makes a portrait phone show
+// a sensible close-up instead of letterboxing the whole 88 m basin.
+const VIEW_MAX_W: f32 = 88.0;
+const VIEW_MAX_H: f32 = 46.0;
+const VIEW_MIN_W: f32 = 30.0;
 
-// Environment adjustment rates (per second of key held).
+// Environment knob rates (per second of key held) and ranges. The touch
+// dials share the same WIND_MAX / CURRENT_MAX: dial rim = max.
 const DIR_RATE: f32 = 45.0; // degrees
 const WIND_RATE: f32 = 3.0; // m/s
 const CURRENT_RATE: f32 = 0.4; // m/s
 const WIND_MAX: f32 = 25.0;
 const CURRENT_MAX: f32 = 2.5;
+
+// --- Safe-area insets (css px), pushed from index.html on the web build.
+// Native builds never call the export and stay at 0.
+static SAFE_T: AtomicU32 = AtomicU32::new(0);
+static SAFE_L: AtomicU32 = AtomicU32::new(0);
+static SAFE_B: AtomicU32 = AtomicU32::new(0);
+static SAFE_R: AtomicU32 = AtomicU32::new(0);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn set_safe_area(top: f32, left: f32, bottom: f32, right: f32) {
+    SAFE_T.store(top.max(0.0).to_bits(), Ordering::Relaxed);
+    SAFE_L.store(left.max(0.0).to_bits(), Ordering::Relaxed);
+    SAFE_B.store(bottom.max(0.0).to_bits(), Ordering::Relaxed);
+    SAFE_R.store(right.max(0.0).to_bits(), Ordering::Relaxed);
+}
+
+fn safe_area() -> (f32, f32, f32, f32) {
+    (
+        f32::from_bits(SAFE_T.load(Ordering::Relaxed)),
+        f32::from_bits(SAFE_L.load(Ordering::Relaxed)),
+        f32::from_bits(SAFE_B.load(Ordering::Relaxed)),
+        f32::from_bits(SAFE_R.load(Ordering::Relaxed)),
+    )
+}
 
 fn window_conf() -> Conf {
     Conf {
@@ -42,8 +78,40 @@ fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
     a + d * t
 }
 
+/// A draggable compass dial (screen-space geometry, css px).
+#[derive(Clone, Copy)]
+struct Dial {
+    cx: f32,
+    cy: f32,
+    r: f32,
+}
+
+impl Dial {
+    fn hit(&self, p: Vec2) -> bool {
+        // Generous hit area — fat fingers land outside the drawn ring.
+        (p - vec2(self.cx, self.cy)).length() <= self.r * 1.45
+    }
+
+    /// Drag position → (compass direction the flow points TOWARD, 0..1
+    /// magnitude). Screen y grows downward, compass 0° = north = up.
+    fn value(&self, p: Vec2) -> (f32, f32) {
+        let v = p - vec2(self.cx, self.cy);
+        let to_deg = v.x.atan2(-v.y).to_degrees().rem_euclid(360.0);
+        let frac = if v.length() < self.r * 0.12 {
+            0.0 // centre dead-zone: an easy way to set dead calm
+        } else {
+            (v.length() / self.r).clamp(0.0, 1.0)
+        };
+        (to_deg.round(), (frac * 20.0).round() / 20.0)
+    }
+}
+
 #[macroquad::main(window_conf)]
 async fn main() {
+    // Touches are handled natively below; without this a touch would also
+    // synthesize a mouse press (= a phantom mouse dial-grab).
+    simulate_mouse_with_touch(false);
+
     let mut sim = Sim::new();
     let mut env = Env {
         wind_from_deg: 315.0,
@@ -56,10 +124,118 @@ async fn main() {
     let (mut prev_pos, mut prev_heading) = sim.boat_pose();
     let (mut cur_pos, mut cur_heading) = (prev_pos, prev_heading);
 
+    // Touch/mouse claims for the two dials. "Fresh touch" detection is by
+    // id-not-seen-last-frame, NOT by TouchPhase::Started — touchstart
+    // collapses into the following touchmove whenever events outpace the
+    // frame loop (the hard-won Pegasus lesson in docs/touch-input.md).
+    let mut prev_touch_ids: Vec<u64> = Vec::new();
+    let mut wind_claim: Option<u64> = None;
+    let mut current_claim: Option<u64> = None;
+    let mut mouse_claim: Option<u8> = None; // 0 = wind, 1 = current
+
     loop {
         let dt = get_frame_time().min(0.05);
+        let sw = screen_width();
+        let sh = screen_height();
+        let dpi = screen_dpi_scale();
+        let (sa_t, sa_l, sa_b, sa_r) = safe_area();
+        let min_dim = sw.min(sh);
 
-        // --- Input: environment knobs + reset. ---------------------------
+        // --- HUD layout (css px) -----------------------------------------
+        let margin = (min_dim * 0.02).clamp(8.0, 18.0);
+        let dial_r = (min_dim * 0.11).clamp(34.0, 54.0);
+        let fs = (min_dim * 0.035).clamp(12.0, 24.0);
+        let wind_dial = Dial {
+            cx: sa_l + margin + dial_r,
+            cy: sa_t + margin + dial_r,
+            r: dial_r,
+        };
+        let current_dial = Dial {
+            cx: sw - sa_r - margin - dial_r,
+            cy: sa_t + margin + dial_r,
+            r: dial_r,
+        };
+        let reset_w = fs * 4.6;
+        let reset_h = fs * 2.2;
+        let reset_rect = Rect::new(
+            sw - sa_r - margin - reset_w,
+            sh - sa_b - margin - reset_h,
+            reset_w,
+            reset_h,
+        );
+
+        let mut do_reset = is_key_pressed(KeyCode::R);
+
+        // --- Touch input: dial drags + reset taps ------------------------
+        let ts = touches();
+        let cur_ids: Vec<u64> = ts.iter().map(|t| t.id).collect();
+        for t in &ts {
+            let p = t.position / dpi; // physical → logical (see header note)
+            let fresh = !prev_touch_ids.contains(&t.id) || t.phase == TouchPhase::Started;
+            if fresh {
+                // A recycled id is a NEW finger: drop any stale claim first.
+                if wind_claim == Some(t.id) {
+                    wind_claim = None;
+                }
+                if current_claim == Some(t.id) {
+                    current_claim = None;
+                }
+                if wind_dial.hit(p) && wind_claim.is_none() {
+                    wind_claim = Some(t.id);
+                } else if current_dial.hit(p) && current_claim.is_none() {
+                    current_claim = Some(t.id);
+                } else if reset_rect.contains(p) {
+                    do_reset = true;
+                }
+            }
+            if wind_claim == Some(t.id) {
+                let (to, frac) = wind_dial.value(p);
+                env.wind_from_deg = (to + 180.0).rem_euclid(360.0);
+                env.wind_speed = frac * WIND_MAX;
+            } else if current_claim == Some(t.id) {
+                let (to, frac) = current_dial.value(p);
+                env.current_to_deg = to;
+                env.current_speed = frac * CURRENT_MAX;
+            }
+        }
+        if wind_claim.is_some_and(|id| !cur_ids.contains(&id)) {
+            wind_claim = None;
+        }
+        if current_claim.is_some_and(|id| !cur_ids.contains(&id)) {
+            current_claim = None;
+        }
+        prev_touch_ids = cur_ids;
+
+        // --- Mouse input: same dials, same gesture -----------------------
+        let mp: Vec2 = mouse_position().into();
+        if is_mouse_button_pressed(MouseButton::Left) {
+            if wind_dial.hit(mp) {
+                mouse_claim = Some(0);
+            } else if current_dial.hit(mp) {
+                mouse_claim = Some(1);
+            } else if reset_rect.contains(mp) {
+                do_reset = true;
+            }
+        }
+        if is_mouse_button_down(MouseButton::Left) {
+            match mouse_claim {
+                Some(0) => {
+                    let (to, frac) = wind_dial.value(mp);
+                    env.wind_from_deg = (to + 180.0).rem_euclid(360.0);
+                    env.wind_speed = frac * WIND_MAX;
+                }
+                Some(1) => {
+                    let (to, frac) = current_dial.value(mp);
+                    env.current_to_deg = to;
+                    env.current_speed = frac * CURRENT_MAX;
+                }
+                _ => {}
+            }
+        } else {
+            mouse_claim = None;
+        }
+
+        // --- Keyboard input ----------------------------------------------
         if is_key_down(KeyCode::Left) {
             env.wind_from_deg -= DIR_RATE * dt;
         }
@@ -86,7 +262,8 @@ async fn main() {
         }
         env.wind_from_deg = env.wind_from_deg.rem_euclid(360.0);
         env.current_to_deg = env.current_to_deg.rem_euclid(360.0);
-        if is_key_pressed(KeyCode::R) {
+
+        if do_reset {
             // Fresh Sim per run — never reuse one (determinism rule).
             sim = Sim::new();
             (prev_pos, prev_heading) = sim.boat_pose();
@@ -94,7 +271,7 @@ async fn main() {
             accum = 0.0;
         }
 
-        // --- Fixed-timestep physics with render interpolation. -----------
+        // --- Fixed-timestep physics with render interpolation ------------
         accum += dt;
         while accum >= PHYSICS_DT {
             prev_pos = cur_pos;
@@ -107,18 +284,25 @@ async fn main() {
         let pos = prev_pos.lerp(cur_pos, alpha);
         let heading = lerp_angle(prev_heading, cur_heading, alpha);
 
-        // --- Camera ------------------------------------------------------
-        let sw = screen_width();
-        let sh = screen_height();
-        let dpi = screen_dpi_scale();
-        let scale = (sw / VIEW_W).min(sh / VIEW_H);
-        let w2s = |p: Vec2| -> Vec2 {
-            vec2(
-                sw * 0.5 + (p.x - VIEW_CX) * scale,
-                sh * 0.5 - (p.y - VIEW_CY) * scale,
-            )
+        // --- Camera: fill the screen, follow the boat, clamp to world ----
+        let scale = (sw / VIEW_MAX_W).max(sh / VIEW_MAX_H).min(sw / VIEW_MIN_W);
+        let (wl, wr) = (-BASIN_HALF_W - 1.5, BASIN_HALF_W + 1.5);
+        let (wb, wt) = (BASIN_BOTTOM_Y - 1.5, QUAY_Y + QUAY_DEPTH);
+        let vis_hw = sw * 0.5 / scale;
+        let vis_hh = sh * 0.5 / scale;
+        let cam_x = if vis_hw * 2.0 >= wr - wl {
+            (wl + wr) * 0.5
+        } else {
+            pos.x.clamp(wl + vis_hw, wr - vis_hw)
         };
-        let ui = ((sw.min(sh) / dpi) / 980.0).min(1.0) * dpi;
+        let cam_y = if vis_hh * 2.0 >= wt - wb {
+            (wb + wt) * 0.5
+        } else {
+            pos.y.clamp(wb + vis_hh, wt - vis_hh)
+        };
+        let w2s = |p: Vec2| -> Vec2 {
+            vec2(sw * 0.5 + (p.x - cam_x) * scale, sh * 0.5 - (p.y - cam_y) * scale)
+        };
 
         // --- Water -------------------------------------------------------
         clear_background(Color::from_rgba(9, 26, 38, 255));
@@ -146,11 +330,10 @@ async fn main() {
             let y = (fy * bh + drift.y * t).rem_euclid(bh) + BASIN_BOTTOM_Y;
             let a = w2s(vec2(x, y));
             let b = w2s(vec2(x + 1.4, y));
-            draw_line(a.x, a.y, b.x, b.y, 1.5 * dpi, Color::from_rgba(120, 170, 190, 26));
+            draw_line(a.x, a.y, b.x, b.y, 1.5, Color::from_rgba(120, 170, 190, 26));
         }
 
         // --- Quay + breakwaters -----------------------------------------
-        // Quay deck (concrete), expansion joints, bollards, edge fender.
         let qa = w2s(vec2(-QUAY_HALF_W, QUAY_Y + QUAY_DEPTH));
         let qb = w2s(vec2(QUAY_HALF_W, QUAY_Y));
         draw_rectangle(qa.x, qa.y, qb.x - qa.x, qb.y - qa.y, Color::from_rgba(88, 92, 99, 255));
@@ -158,7 +341,7 @@ async fn main() {
         while jx < QUAY_HALF_W {
             let a = w2s(vec2(jx, QUAY_Y));
             let b = w2s(vec2(jx, QUAY_Y + QUAY_DEPTH));
-            draw_line(a.x, a.y, b.x, b.y, 1.0 * dpi, Color::from_rgba(70, 74, 80, 255));
+            draw_line(a.x, a.y, b.x, b.y, 1.0, Color::from_rgba(70, 74, 80, 255));
             jx += 4.0;
         }
         // Edge kerb + hanging fenders (visual; the collider is the line).
@@ -198,7 +381,6 @@ async fn main() {
         // --- Boat --------------------------------------------------------
         let (c, s) = (heading.cos(), heading.sin());
         let bl = |lx: f32, ly: f32| -> Vec2 { w2s(pos + vec2(lx * c - ly * s, lx * s + ly * c)) };
-        // Hull: convex fan fill + gunwale outline.
         let hull_fill = Color::from_rgba(230, 226, 212, 255);
         let hull_line = Color::from_rgba(40, 42, 48, 255);
         let p0 = bl(HULL_PTS[0].0, HULL_PTS[0].1);
@@ -213,7 +395,7 @@ async fn main() {
             let b = bl(bx2, by2);
             draw_line(a.x, a.y, b.x, b.y, (0.18 * scale).max(1.0), hull_line);
         }
-        // Deck details: foredeck line, wheelhouse aft, a mast dot.
+        // Deck details: foredeck lines, wheelhouse aft, windscreen, mast.
         let d1 = bl(3.2, 0.0);
         let d2a = bl(4.2, 1.2);
         let d2b = bl(4.2, -1.2);
@@ -228,7 +410,6 @@ async fn main() {
             let b = bl(wh[(i + 1) % 4].0, wh[(i + 1) % 4].1);
             draw_line(a.x, a.y, b.x, b.y, (0.1 * scale).max(1.0), hull_line);
         }
-        // Windscreen strip on the wheelhouse front (facing the bow).
         let wsa = bl(-0.8, 0.9);
         let wsb = bl(-0.8, -0.9);
         draw_line(wsa.x, wsa.y, wsb.x, wsb.y, (0.3 * scale).max(2.0), Color::from_rgba(70, 110, 130, 255));
@@ -236,76 +417,97 @@ async fn main() {
         draw_circle(mast.x, mast.y, (0.18 * scale).max(1.5), hull_line);
 
         // --- HUD ---------------------------------------------------------
-        let fs = 26.0 * ui;
         let text = Color::from_rgba(205, 227, 240, 255);
         let dim = Color::from_rgba(130, 160, 178, 255);
-        let margin = 16.0 * ui;
+        let wind_col = Color::from_rgba(120, 220, 255, 255);
+        let cur_col = Color::from_rgba(90, 235, 170, 255);
 
-        // A compass-style indicator: circle + arrow of the PUSH direction.
-        let indicator = |cx: f32, cy: f32, r: f32, dir: Vec2, col: Color| {
-            draw_circle_lines(cx, cy, r, 1.5 * dpi, dim);
-            if dir.length() > 1e-3 {
-                let d = vec2(dir.x, -dir.y).normalize(); // screen y is down
-                let tip = vec2(cx, cy) + d * r * 0.85;
-                let tail = vec2(cx, cy) - d * r * 0.85;
-                draw_line(tail.x, tail.y, tip.x, tip.y, 3.0 * dpi, col);
-                let n = vec2(-d.y, d.x);
+        // A dial: bg disc, ring (bright while grabbed), N tick, arrow of the
+        // flow's TOWARD direction with a knob at the magnitude, label below.
+        let draw_dial = |d: &Dial, vel: Vec2, frac: f32, col: Color, grabbed: bool, label: &str| {
+            draw_circle(d.cx, d.cy, d.r, Color::from_rgba(10, 20, 30, 150));
+            let ring = if grabbed { col } else { dim };
+            draw_circle_lines(d.cx, d.cy, d.r, if grabbed { 2.5 } else { 1.5 }, ring);
+            draw_text("N", d.cx - fs * 0.22, d.cy - d.r + fs * 0.75, fs * 0.7, dim);
+            if vel.length() > 1e-3 {
+                let dir = vec2(vel.x, -vel.y).normalize(); // screen y down
+                let tip = vec2(d.cx, d.cy) + dir * d.r * frac.max(0.18);
+                let tail = vec2(d.cx, d.cy) - dir * d.r * 0.25;
+                draw_line(tail.x, tail.y, tip.x, tip.y, 3.0, col);
+                let n = vec2(-dir.y, dir.x);
                 draw_triangle(
-                    tip + d * 8.0 * ui,
-                    tip - d * 2.0 * ui + n * 6.0 * ui,
-                    tip - d * 2.0 * ui - n * 6.0 * ui,
+                    tip + dir * fs * 0.55,
+                    tip - dir * fs * 0.1 + n * fs * 0.4,
+                    tip - dir * fs * 0.1 - n * fs * 0.4,
                     col,
                 );
             } else {
-                draw_circle(cx, cy, 3.0 * dpi, col);
+                draw_circle(d.cx, d.cy, 3.0, col);
             }
+            let dims = measure_text(label, None, fs as u16, 1.0);
+            draw_text(
+                label,
+                (d.cx - dims.width * 0.5).clamp(4.0, sw - dims.width - 4.0),
+                d.cy + d.r + fs * 1.1,
+                fs,
+                col,
+            );
         };
 
-        let wind_col = Color::from_rgba(120, 220, 255, 255);
-        let cur_col = Color::from_rgba(90, 235, 170, 255);
-        let r = 34.0 * ui;
-        indicator(margin + r, margin + r, r, env.wind_vel(), wind_col);
-        draw_text(
-            format!("WIND {:.1} m/s from {:03.0}\u{00b0}", env.wind_speed, env.wind_from_deg),
-            margin + r * 2.0 + 10.0 * ui,
-            margin + r + fs * 0.35,
-            fs,
+        draw_dial(
+            &wind_dial,
+            env.wind_vel(),
+            env.wind_speed / WIND_MAX,
             wind_col,
+            wind_claim.is_some() || mouse_claim == Some(0),
+            &format!("WIND {:.1} m/s from {:03.0}", env.wind_speed, env.wind_from_deg),
         );
-        let cy2 = margin + r * 2.0 + 14.0 * ui + r;
-        indicator(margin + r, cy2, r, env.current_vel(), cur_col);
-        draw_text(
-            format!("CURRENT {:.1} m/s to {:03.0}\u{00b0}", env.current_speed, env.current_to_deg),
-            margin + r * 2.0 + 10.0 * ui,
-            cy2 + fs * 0.35,
-            fs,
+        draw_dial(
+            &current_dial,
+            env.current_vel(),
+            env.current_speed / CURRENT_MAX,
             cur_col,
+            current_claim.is_some() || mouse_claim == Some(1),
+            &format!("CURR {:.1} m/s to {:03.0}", env.current_speed, env.current_to_deg),
         );
 
-        // Boat speed-over-ground readout.
+        // Boat speed-over-ground, centred between the dials.
         let (v, _) = sim.boat_vel();
+        let sog = format!("SOG {:.2} m/s", v.length());
+        let sd = measure_text(&sog, None, fs as u16, 1.0);
+        draw_text(&sog, sw * 0.5 - sd.width * 0.5, sa_t + margin + fs, fs, text);
+
+        // Reset button (bottom-right) — the touch/mouse twin of the R key.
+        draw_rectangle(
+            reset_rect.x,
+            reset_rect.y,
+            reset_rect.w,
+            reset_rect.h,
+            Color::from_rgba(10, 20, 30, 170),
+        );
+        draw_rectangle_lines(reset_rect.x, reset_rect.y, reset_rect.w, reset_rect.h, 2.0, dim);
+        let rl = measure_text("RESET", None, fs as u16, 1.0);
         draw_text(
-            format!("SOG {:.2} m/s", v.length()),
-            margin + r * 2.0 + 10.0 * ui,
-            cy2 + r + fs * 1.1,
+            "RESET",
+            reset_rect.x + (reset_rect.w - rl.width) * 0.5,
+            reset_rect.y + reset_rect.h * 0.5 + fs * 0.35,
             fs,
             text,
         );
 
-        // Key help, bottom-left.
-        // ASCII only: macroquad's built-in font has no arrow glyphs (they
-        // render as tofu boxes).
-        let help = [
-            "arrow keys: wind (left/right dir, up/down speed)",
-            "A/D: current dir   W/S: current speed",
-            "R: reset boat",
-        ];
+        // Hints, bottom-left. Keyboard lines only where a keyboard is
+        // likely (wide screens); ASCII only — the built-in font has no
+        // arrow glyphs.
+        let mut help: Vec<&str> = vec!["drag the dials to set wind & current"];
+        if sw >= 700.0 {
+            help.push("keys: arrows = wind, A/D+W/S = current, R = reset");
+        }
         for (i, line) in help.iter().enumerate() {
             draw_text(
                 line,
-                margin,
-                sh - margin - (help.len() - 1 - i) as f32 * fs * 1.15,
-                fs * 0.85,
+                sa_l + margin,
+                sh - sa_b - margin - (help.len() - 1 - i) as f32 * fs,
+                fs * 0.8,
                 dim,
             );
         }
