@@ -1,11 +1,13 @@
 # Harbour Sim — mooring simulator
 
 Rust + macroquad 0.4.15 + Rapier 2D, compiled to WebAssembly and served via
-GitHub Pages. Top-down simulator of a boat in a harbour: currently a proof of
-concept — the boat lies alongside a fixed quay under adjustable wind and
-current. The goal is mooring manoeuvres with placeable ropes (bow/stern
-lines, springs) under different conditions; ropes, scenarios and scoring are
-future work.
+GitHub Pages. Top-down simulator of a small cruising sailboat docking in a
+harbour under engine — sails furled/down throughout, no sail force modeled;
+wind is purely an external load, same as it would be on any boat lying to
+it. Currently a proof of concept — the boat lies alongside a fixed quay
+under adjustable wind and current. The goal is mooring manoeuvres with
+placeable ropes (bow/stern lines, springs) under different conditions;
+ropes, scenarios and scoring are future work.
 
 Boilerplate and pipeline are copied from **dannyrhubarb/pegasus** (2026-08) —
 when in doubt about a pattern or a CI gotcha, that repo's CLAUDE.md is the
@@ -141,7 +143,9 @@ interpolation (`lerp` + shortest-path angle lerp) like Pegasus.
 - **Boat**: one dynamic body, convex-hull collider of `HULL_PTS` (bow = +x
   local, ~12 m × 3.8 m, ~7.5 t via `HULL_DENSITY`). `HULL_PTS` is shared
   with the renderer, so **visuals match collision exactly** (the Pegasus
-  alignment rule).
+  alignment rule). A small cruising sailboat: coachroof, cockpit, sprayhood,
+  mast + boom (rendered even with the sail furled — see Frontend
+  conventions below); the rig is cosmetic, not a physics input.
 - **Env** (`wind_from_deg`, `wind_speed`, `current_to_deg`, `current_speed`):
   compass convention 0° = north = +y, 90° = east = +x. Wind is named by
   where it blows FROM (mariners' convention), current by where it sets
@@ -160,6 +164,15 @@ interpolation (`lerp` + shortest-path angle lerp) like Pegasus.
   wind force acts slightly FORWARD of centre (`WIND_CENTER_OFFSET > 0`, bow
   windage → the bow falls off downwind). Tune behaviour there, not with
   fudge torques.
+- **Axial windage is asymmetric fore/aft, unlike the water-drag terms**:
+  `CD_AIR_BOW` (fine entry, sprayhood raked to deflect a headwind) is well
+  below `CD_AIR_STERN` (wide stern, and a following wind finds the
+  sprayhood's open concave side and scoops into it instead of being
+  deflected). Selected in `tick` by the sign of the relative wind's axial
+  component — a single symmetric coefficient here would silently assume
+  the boat is shaped the same front and back, which it visibly isn't (see
+  the Boat bullet above). `a_following_wind_pushes_harder_than_a_headwind_
+  of_the_same_speed` pins the direction of this asymmetry.
 - **Keel profile (`sim-core/src/keel.rs`)**: the lateral water force's lever
   arm and the yaw damping coefficient used to be two independently
   hand-tuned constants (`WATER_CLR_OFFSET`, `C_YAW_Q`) — but they're both
@@ -183,7 +196,7 @@ interpolation (`lerp` + shortest-path angle lerp) like Pegasus.
   out-drags the bow, shoving the boat to starboard; that's what puts the
   effective centre of rotation aft of the centre of mass (`clr_offset`
   and `swept_moment` are the two off-diagonal sway↔yaw couplings of the
-  same damping matrix). `Sim::new()` uses `KeelProfile::default_workboat()`
+  same damping matrix). `Sim::new()` uses `KeelProfile::default_sailboat()`
   (hand-tuned close to, not identical to, the legacy constants);
   `Sim::new_with_keel(&profile)` takes any other profile — used by the
   keel editor.

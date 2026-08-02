@@ -157,14 +157,14 @@ impl KeelProfile {
         }
     }
 
-    /// The default workboat profile: a moderate skeg + rudder aperture,
-    /// biased aft. Hand-tuned to land close to (not identical to) the
-    /// legacy constants it replaces (`WATER_AREA_LAT = 12`,
-    /// `WATER_CLR_OFFSET = -0.6`, `C_YAW_Q = 400_000` — derives to
+    /// The default cruising-sailboat profile: a moderate fin keel with a
+    /// skeg-hung rudder, biased aft. Hand-tuned to land close to (not
+    /// identical to) the legacy constants it replaces (`WATER_AREA_LAT =
+    /// 12`, `WATER_CLR_OFFSET = -0.6`, `C_YAW_Q = 400_000` — derives to
     /// area≈11.9, clr≈-0.87, C_YAW_Q≈353k) so existing behaviour doesn't
     /// shift much underfoot; the curve is the source of truth from here on,
     /// not the old numbers.
-    pub fn default_workboat() -> KeelProfile {
+    pub fn default_sailboat() -> KeelProfile {
         KeelProfile {
             points: vec![
                 Vec2::new(-6.0, 1.0),
