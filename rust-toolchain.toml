@@ -1,0 +1,15 @@
+# Pin the toolchain the wasm build is verified against. The GitHub runner's
+# preinstalled stable moves on its own schedule, and a newer stable broke the
+# wasm RELEASE link (rust-lld: "undefined symbol: console_log/now/init_webgl
+# ..." — miniquad's JS imports no longer become implicit wasm imports at
+# link time; `cargo check` still passes, only the link step fails, so CI's
+# check job won't catch it). Seen live on the very first preview deploy,
+# 2026-08-02. Upgrade this pin deliberately, together with a wasm build +
+# browser smoke test.
+[toolchain]
+channel = "1.94.1"
+# rustup auto-installs a pinned toolchain with the MINIMAL profile on CI:
+# without listing clippy here, `cargo clippy` fails with "'cargo-clippy' is
+# not installed for the toolchain" (second lesson of the same deploy day).
+components = ["clippy"]
+targets = ["wasm32-unknown-unknown"]

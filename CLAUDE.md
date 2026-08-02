@@ -88,6 +88,14 @@ icons + revision injection; `.github/actions/sync-pages-branch` = commit into
   that silently kills the whole inline script. Pick distinct names.
 - `icon.svg` — source for the PNG icons rendered at deploy time
   (`rsvg-convert` in build-site).
+- `rust-toolchain.toml` — **pins the Rust toolchain (1.94.1)**. The first
+  preview deploy failed because the runner's newer preinstalled stable broke
+  the wasm RELEASE link (`rust-lld: undefined symbol: console_log/now/...` —
+  miniquad's JS imports stopped becoming implicit wasm imports). Beware:
+  `cargo check --target wasm32-unknown-unknown` does NOT link, so CI's check
+  job stays green while the deploy build fails. Upgrade the pin deliberately
+  with a full wasm build + browser smoke test. (Pegasus has no pin and will
+  likely hit the same wall on its next deploy.)
 
 ## Simulation model (sim-core/src/sim.rs)
 
