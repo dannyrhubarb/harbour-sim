@@ -139,14 +139,40 @@ interpolation (`lerp` + shortest-path angle lerp) like Pegasus.
   property that will make replays possible.
 
 ## Frontend conventions (src/main.rs)
-- Fixed view: the camera letterboxes a `VIEW_W × VIEW_H` metre rectangle;
+- **Units (verified against the vendored macroquad 0.4.15 source)**:
+  `screen_width()/screen_height()` and `mouse_position()` are LOGICAL css px
+  (physical / dpi); `touches()` returns RAW PHYSICAL px and every touch
+  position is divided by `screen_dpi_scale()` before use (the Pegasus
+  gotcha). HUD sizes are written directly in css px, clamped
+  (`(min_dim * k).clamp(lo, hi)`) — no more `ui` multiplier.
+- **Camera fills the screen and follows the boat**: `scale =
+  max(sw/VIEW_MAX_W, sh/VIEW_MAX_H).min(sw/VIEW_MIN_W)` (never more than
+  88×46 m visible, never fewer than 30 m across), camera centred on the
+  interpolated boat pose and clamped to the world rect. This is what makes
+  portrait phones show a close-up instead of letterboxing the whole basin.
   `w2s` closure converts world → screen px (y inverted).
-- `ui` scale for HUD text follows the Pegasus formula
-  (`(sw.min(sh)/dpi/980).min(1) * dpi`); `high_dpi: true` in `window_conf`.
+- **Touch controls**: the two HUD compass indicators are draggable **dials**
+  (`Dial` struct) — drag direction from the dial centre = the flow's TOWARD
+  direction (wind label still displays the mariners' FROM convention:
+  from = to + 180°), drag distance = speed (rim = `WIND_MAX`/`CURRENT_MAX`,
+  centre dead-zone = calm). A RESET button (bottom-right) twins the R key.
+  Mouse drives the same dials via press/drag. `simulate_mouse_with_touch
+  (false)` at startup so touches don't double as mouse presses. **Touch
+  claims are by id-not-seen-last-frame, NOT `TouchPhase::Started`** —
+  touchstart collapses into the following touchmove whenever touch events
+  outpace the frame loop (the hard-won Pegasus phase-collapse lesson; a
+  `Started` phase on an already-claimed id means a recycled id = new
+  finger, so the claim is dropped and re-evaluated).
+- **Safe-area insets**: `index.html` resolves `env(safe-area-inset-*)` via a
+  hidden probe element (+ folds the floating-toolbar height in via
+  `visualViewport`) and pushes css px into the wasm export
+  `set_safe_area(t,l,b,r)` (atomics, re-pushed on resize/orientation
+  change). The HUD layout adds them to its margins; native builds stay 0.
 - Cosmetic-only nondeterminism is allowed render-side (the water ripples use
   `get_time()`); nothing cosmetic may feed back into the sim.
-- Controls: ←/→ wind dir, ↑/↓ wind speed, A/D current dir, W/S current
-  speed, R reset (reset = `Sim::new()`, never an in-place teleport).
+- Controls: touch/mouse = drag the dials + RESET button; keyboard = ←/→
+  wind dir, ↑/↓ wind speed, A/D current dir, W/S current speed, R reset
+  (reset = `Sim::new()`, never an in-place teleport; env is kept).
 
 ## Roadmap (agreed direction, not yet built)
 - **Ropes**: placeable mooring lines (bow/stern/springs) — each a constraint
