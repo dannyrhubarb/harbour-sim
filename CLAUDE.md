@@ -204,6 +204,14 @@ interpolation (`lerp` + shortest-path angle lerp) like Pegasus.
   `visualViewport`) and pushes css px into the wasm export
   `set_safe_area(t,l,b,r)` (atomics, re-pushed on resize/orientation
   change). The HUD layout adds them to its margins; native builds stay 0.
+  **Gotcha (iOS Safari, 2026-08-02)**: the canvas is sized `100dvh` (with a
+  `100vh` fallback) because iOS defines `100vh` as the toolbar-COLLAPSED
+  viewport and a non-scrolling page never collapses the toolbar — a 100vh
+  canvas keeps its bottom strip permanently behind the address bar, hiding
+  the KEEL/RESET buttons. The toolbar overlap fold-in must compare the
+  canvas's `getBoundingClientRect().bottom` against
+  `visualViewport.offsetTop + height`, NOT `window.innerHeight` — on iOS
+  `innerHeight` shrinks with the visible area, so the difference reads 0.
 - Cosmetic-only nondeterminism is allowed render-side (the water ripples use
   `get_time()`); nothing cosmetic may feed back into the sim.
 - Controls: touch/mouse = drag the dials + RESET/KEEL buttons; keyboard =
