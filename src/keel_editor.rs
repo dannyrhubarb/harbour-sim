@@ -37,15 +37,24 @@ pub enum EditorAction {
 pub struct KeelEditor {
     pub active: bool,
     ys: [f32; EDIT_XS.len()],
-    /// Touch ids seen last frame — lets button taps use the same
-    /// fresh-touch detection as the HUD dials (see `update`).
-    prev_touch_ids: Vec<u64>,
+    /// Touch id + position seen last frame — lets button taps use the same
+    /// fresh-touch detection as the HUD dials, and lets drag painting fill
+    /// in the columns between two frames' samples instead of leaving gaps
+    /// (see `update`/`drag_fill`).
+    prev_touches: Vec<(u64, Vec2)>,
+    /// Mouse position last frame while the button was held, for the same
+    /// gap-filling reason on a mouse drag.
+    mouse_drag_prev: Option<Vec2>,
 }
 
 impl KeelEditor {
     pub fn new(initial: &KeelProfile) -> Self {
-        let mut editor =
-            KeelEditor { active: false, ys: [0.0; EDIT_XS.len()], prev_touch_ids: Vec::new() };
+        let mut editor = KeelEditor {
+            active: false,
+            ys: [0.0; EDIT_XS.len()],
+            prev_touches: Vec::new(),
+            mouse_drag_prev: None,
+        };
         editor.load(initial);
         editor
     }
@@ -64,19 +73,38 @@ impl KeelEditor {
         }
     }
 
-    /// Paint the column under `p` (screen px) if it falls inside `canvas`.
-    /// Shared by mouse-drag and touch-drag.
-    fn drag_at(&mut self, canvas: Rect, p: Vec2) {
-        if !canvas.contains(p) {
+    /// Paint every column between `prev` and `cur` (screen px), linearly
+    /// interpolating the value between them, if `cur` falls inside
+    /// `canvas`. Shared by mouse-drag and touch-drag.
+    ///
+    /// A single sample per frame isn't enough: at the finer 0.25 m grid
+    /// (as little as ~6 px/column on a portrait phone) a normal-speed
+    /// stroke easily moves several columns between two frames' samples,
+    /// which without filling leaves a comb of isolated painted columns
+    /// instead of a continuous curve.
+    fn drag_fill(&mut self, canvas: Rect, prev: Vec2, cur: Vec2) {
+        if !canvas.contains(cur) {
             return;
         }
-        let t = ((p.x - canvas.x) / canvas.w).clamp(0.0, 1.0);
-        let idx = (t * (EDIT_XS.len() - 1) as f32).round() as usize;
         // The baseline (0 area) is the TOP of the canvas — this is a keel
         // hanging below the hull, so more area reads as deeper (further
         // down), like a real keel-profile sketch, not taller.
-        let value = ((p.y - canvas.y) / canvas.h * MAX_AREA_PER_LEN).clamp(0.0, MAX_AREA_PER_LEN);
-        self.ys[idx] = value;
+        let project = |p: Vec2| {
+            let t = ((p.x - canvas.x) / canvas.w).clamp(0.0, 1.0);
+            let idx = (t * (EDIT_XS.len() - 1) as f32).round() as usize;
+            let v =
+                ((p.y - canvas.y) / canvas.h * MAX_AREA_PER_LEN).clamp(0.0, MAX_AREA_PER_LEN);
+            (idx, v)
+        };
+        let (idx0, v0) = project(prev);
+        let (idx1, v1) = project(cur);
+        let (idx_a, v_a, idx_b, v_b) =
+            if idx0 <= idx1 { (idx0, v0, idx1, v1) } else { (idx1, v1, idx0, v0) };
+        for idx in idx_a..=idx_b {
+            let frac =
+                if idx_b > idx_a { (idx - idx_a) as f32 / (idx_b - idx_a) as f32 } else { 1.0 };
+            self.ys[idx] = v_a + (v_b - v_a) * frac;
+        }
     }
 
     /// A click/tap at `p` (screen px) on one of the four buttons, if any.
@@ -99,11 +127,15 @@ impl KeelEditor {
     /// cancel) button rects, also in screen pixels.
     pub fn update(&mut self, canvas: Rect, buttons: EditorButtons) -> EditorAction {
         let (mx, my) = mouse_position();
+        let cur = vec2(mx, my);
         if is_mouse_button_down(MouseButton::Left) {
-            self.drag_at(canvas, vec2(mx, my));
+            self.drag_fill(canvas, self.mouse_drag_prev.unwrap_or(cur), cur);
+            self.mouse_drag_prev = Some(cur);
+        } else {
+            self.mouse_drag_prev = None;
         }
         if is_mouse_button_pressed(MouseButton::Left) {
-            let action = self.button_at(buttons, vec2(mx, my));
+            let action = self.button_at(buttons, cur);
             if !matches!(action, EditorAction::None) {
                 return action;
             }
@@ -115,14 +147,18 @@ impl KeelEditor {
         // usable on an actual touchscreen.
         let dpi = screen_dpi_scale();
         let ts = touches();
-        let cur_ids: Vec<u64> = ts.iter().map(|t| t.id).collect();
+        let mut next_prev_touches: Vec<(u64, Vec2)> = Vec::with_capacity(ts.len());
         let mut touch_action = EditorAction::None;
         for t in &ts {
             let p = t.position / dpi; // physical → logical px
-            self.drag_at(canvas, p);
+            let prev_pos = self.prev_touches.iter().find(|(id, _)| *id == t.id).map(|&(_, p)| p);
             // Only a FRESH touch taps a button — a finger held on Apply
-            // must not re-trigger it every frame it stays down.
-            let fresh = !self.prev_touch_ids.contains(&t.id) || t.phase == TouchPhase::Started;
+            // must not re-trigger it every frame it stays down. A fresh
+            // touch also has no real "previous" drag position, so its fill
+            // degenerates to painting just the one column under it.
+            let fresh = prev_pos.is_none() || t.phase == TouchPhase::Started;
+            self.drag_fill(canvas, prev_pos.unwrap_or(p), p);
+            next_prev_touches.push((t.id, p));
             if fresh {
                 let action = self.button_at(buttons, p);
                 if !matches!(action, EditorAction::None) {
@@ -130,7 +166,7 @@ impl KeelEditor {
                 }
             }
         }
-        self.prev_touch_ids = cur_ids;
+        self.prev_touches = next_prev_touches;
         if !matches!(touch_action, EditorAction::None) {
             return touch_action;
         }
