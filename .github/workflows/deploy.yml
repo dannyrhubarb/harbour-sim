@@ -1,0 +1,39 @@
+name: Main deploy
+
+# Build main and sync it into the ROOT of the gh-pages state branch, keeping
+# any live pr-<n>/ previews intact. The actual GitHub Pages deployment happens
+# in publish-pages.yml (workflow_run) — see that file for why the indirection
+# exists.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write # push to the gh-pages state branch
+
+concurrency:
+  group: main-deploy
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve revision
+        id: rev
+        run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build site
+        uses: ./.github/actions/build-site
+        with:
+          revision: ${{ steps.rev.outputs.short }}
+
+      - name: Sync site root into gh-pages branch
+        uses: ./.github/actions/sync-pages-branch
+        with:
+          source-dir: site
+          message: "main: deploy ${{ steps.rev.outputs.short }}"
