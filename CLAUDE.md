@@ -150,13 +150,21 @@ interpolation (`lerp` + shortest-path angle lerp) like Pegasus.
   arm paired with a full keel's yaw damping). `KeelProfile` (piecewise-linear
   area-per-length vs. hull position) is now the single source of truth:
   `KeelProfile::derive()` integrates it (trapezoidal rule) into
-  `KeelDerived { area, clr_offset, cubic_moment }`, stored on `Sim` and used
-  in `tick` in place of the old constants. The physical reasoning: a strip
-  at distance `x` from the pivot sweeps sideways at `w·x` during yaw, and
-  drag is quadratic in speed, so its torque contribution scales as `x³` —
-  concentrating area near the pivot (fin keel) trades away yaw damping much
-  faster than it trades away total area, which is *why* fin keels spin
-  freely and full keels don't. `Sim::new()` uses `KeelProfile::default_workboat()`
+  `KeelDerived { area, clr_offset, cubic_moment, swept_moment }`, stored on
+  `Sim` and used in `tick` in place of the old constants. The physical
+  reasoning: a strip at distance `x` from the pivot sweeps sideways at
+  `w·x` during yaw, and drag is quadratic in speed, so its torque
+  contribution scales as `x³` — concentrating area near the pivot (fin
+  keel) trades away yaw damping much faster than it trades away total
+  area, which is *why* fin keels spin freely and full keels don't. The
+  same sweep also yields a SIGNED `x·|x|` moment (`swept_moment`): when
+  the area is biased fore/aft, the strips resisting a spin don't pull
+  symmetrically, so rotation produces a net SIDE FORCE, not just the
+  damping torque — spin an aft-biased hull clockwise and the stern
+  out-drags the bow, shoving the boat to starboard; that's what puts the
+  effective centre of rotation aft of the centre of mass (`clr_offset`
+  and `swept_moment` are the two off-diagonal sway↔yaw couplings of the
+  same damping matrix). `Sim::new()` uses `KeelProfile::default_workboat()`
   (hand-tuned close to, not identical to, the legacy constants);
   `Sim::new_with_keel(&profile)` takes any other profile — used by the
   keel editor.
