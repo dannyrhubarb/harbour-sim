@@ -55,7 +55,12 @@ pub const HULL_PTS: [(f32, f32); 8] = [
 ];
 
 /// 2D area density of the hull (kg/m²). Hull area is ~38 m² => ~7.5 t
-/// displacement, a smallish workboat.
+/// displacement — sized for the current (and, for now, only) modeled ship
+/// type, a small cruising sailboat under engine (harbour manoeuvres/
+/// docking — sails furled, no sail force modeled; wind is purely an
+/// external load on the hull/rig, same as it would be on any motorboat
+/// lying to it). A second ship type would bring its own hull geometry,
+/// density, and windage constants alongside these, not in place of them.
 const HULL_DENSITY: f32 = 200.0;
 
 // Air / water densities (kg/m³) for the quadratic load formulas.
@@ -75,7 +80,14 @@ const WIND_AREA_FRONT: f32 = 7.0;
 const CD_WATER_LAT: f32 = 1.1;
 const CD_WATER_FRONT: f32 = 0.5;
 const CD_AIR_LAT: f32 = 1.0;
-const CD_AIR_FRONT: f32 = 0.7;
+// Axial windage isn't symmetric fore/aft the way the water-drag terms are:
+// the bow is a fine entry with a sprayhood shaped to deflect airflow when
+// moving into it (low drag), while the stern is wide and presents the
+// sprayhood's open, concave side to a following wind — which doesn't just
+// fail to deflect, it scoops the airflow like a cupped sail. Selected by
+// the sign of the relative wind's axial component in `tick`.
+const CD_AIR_BOW: f32 = 0.45;
+const CD_AIR_STERN: f32 = 0.95;
 
 /// Yaw damping coefficient (N·m per (rad/s)²) for a keel's cubic moment
 /// (see `KeelDerived::cubic_moment`). Exposed so the keel editor's live
@@ -118,7 +130,7 @@ fn k_lin_yaw(c_yaw_q: f32) -> f32 {
 
 /// Where the lateral WIND force acts, forward of the centre (m). Slightly
 /// forward — high bow / foredeck windage — so the bow blows off downwind,
-/// the familiar behaviour of a motorboat lying still in a breeze.
+/// the familiar behaviour of a boat lying still in a breeze.
 const WIND_CENTER_OFFSET: f32 = 0.9;
 
 /// Where the boat starts: lying alongside the quay, parallel, bow east,
@@ -199,9 +211,11 @@ impl Default for Sim {
 }
 
 impl Sim {
-    /// A boat with the default workboat keel profile (skeg + rudder).
+    /// A boat with the default keel profile for the current (and, for now,
+    /// only) modeled ship type: a small cruising sailboat (fin keel,
+    /// skeg-hung rudder).
     pub fn new() -> Sim {
-        Self::new_with_keel(&KeelProfile::default_workboat())
+        Self::new_with_keel(&KeelProfile::default_sailboat())
     }
 
     /// A boat whose underwater lateral-area distribution — and therefore
@@ -378,7 +392,10 @@ impl Sim {
         let ar = env.wind_vel() - v;
         let a_ax = ar.dot(fwd);
         let a_lat = ar.dot(side);
-        let f_wax = fwd * (0.5 * RHO_AIR * CD_AIR_FRONT * WIND_AREA_FRONT * a_ax * a_ax.abs());
+        // a_ax > 0: relative wind moves toward the bow, i.e. it's blowing
+        // FROM astern (a following wind) => the stern meets it first.
+        let cd_air_ax = if a_ax > 0.0 { CD_AIR_STERN } else { CD_AIR_BOW };
+        let f_wax = fwd * (0.5 * RHO_AIR * cd_air_ax * WIND_AREA_FRONT * a_ax * a_ax.abs());
         let f_wlat = side * (0.5 * RHO_AIR * CD_AIR_LAT * WIND_AREA_LAT * a_lat * a_lat.abs());
         rb.add_force(vector![f_wax.x, f_wax.y], true);
         // Lateral windage centre sits forward => the bow falls off downwind.
@@ -551,6 +568,32 @@ mod tests {
             vs.length() < 0.005,
             "symmetric profile should not drift from a pure spin, got |v| = {}",
             vs.length()
+        );
+    }
+
+    #[test]
+    fn a_following_wind_pushes_harder_than_a_headwind_of_the_same_speed() {
+        // The sprayhood deflects a headwind (fine bow) but presents its
+        // open, concave side to a following wind (which scoops into it,
+        // same idea as a wide stern) — axial windage is NOT symmetric
+        // fore/aft the way the water-drag terms are. Boat starts at
+        // heading 0 (bow = +x), so wind_from_deg = 90 (from due east,
+        // blowing west, opposing the bow) is a pure headwind, and
+        // wind_from_deg = 270 (from due west, blowing east, with the bow)
+        // is a pure following wind — both purely axial, no lateral
+        // component, so this isolates CD_AIR_BOW vs CD_AIR_STERN.
+        let mut headwind = Sim::new();
+        let mut following = Sim::new();
+        let headwind_env = Env { wind_from_deg: 90.0, wind_speed: 10.0, ..Env::CALM };
+        let following_env = Env { wind_from_deg: 270.0, wind_speed: 10.0, ..Env::CALM };
+        run(&mut headwind, &headwind_env, 2.0);
+        run(&mut following, &following_env, 2.0);
+        let head_speed = headwind.boat_vel().0.length();
+        let following_speed = following.boat_vel().0.length();
+        assert!(
+            following_speed > head_speed * 1.5,
+            "expected a following wind to push noticeably harder than a headwind: \
+             following {following_speed} m/s vs headwind {head_speed} m/s"
         );
     }
 }

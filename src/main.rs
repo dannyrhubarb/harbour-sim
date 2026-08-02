@@ -125,7 +125,7 @@ async fn main() {
     // synthesize a mouse press (= a phantom mouse dial-grab).
     simulate_mouse_with_touch(false);
 
-    let mut keel_profile = KeelProfile::default_workboat();
+    let mut keel_profile = KeelProfile::default_sailboat();
     let mut sim = Sim::new_with_keel(&keel_profile);
     let mut editor = KeelEditor::new(&keel_profile);
     let mut env = Env {
@@ -441,25 +441,54 @@ async fn main() {
             let b = bl(bx2, by2);
             draw_line(a.x, a.y, b.x, b.y, (0.18 * scale).max(1.0), hull_line);
         }
-        // Deck details: foredeck lines, wheelhouse aft, windscreen, mast.
+        // Deck details for the current (and, for now, only) modeled ship
+        // type — a small cruising sailboat: foredeck lines, coachroof,
+        // cockpit, sprayhood, mast + boom (rendered even with the sail
+        // furled/down — see Simulation model in CLAUDE.md; the rig is
+        // cosmetic, not a physics input). A future second ship type would
+        // get its own rendering branch alongside this one.
         let d1 = bl(3.2, 0.0);
         let d2a = bl(4.2, 1.2);
         let d2b = bl(4.2, -1.2);
         draw_line(d2a.x, d2a.y, d1.x, d1.y, (0.12 * scale).max(1.0), hull_line);
         draw_line(d2b.x, d2b.y, d1.x, d1.y, (0.12 * scale).max(1.0), hull_line);
-        let wh = [(-3.8, 1.2), (-0.8, 1.2), (-0.8, -1.2), (-3.8, -1.2)];
-        let w0 = bl(wh[0].0, wh[0].1);
-        draw_triangle(w0, bl(wh[1].0, wh[1].1), bl(wh[2].0, wh[2].1), Color::from_rgba(178, 182, 188, 255));
-        draw_triangle(w0, bl(wh[2].0, wh[2].1), bl(wh[3].0, wh[3].1), Color::from_rgba(178, 182, 188, 255));
+
+        // Coachroof (cabin trunk): lower and narrower than full beam — side
+        // decks stay clear either side for walking forward.
+        let ch = [(-2.6, 1.0), (0.3, 1.0), (0.3, -1.0), (-2.6, -1.0)];
+        let ch0 = bl(ch[0].0, ch[0].1);
+        draw_triangle(ch0, bl(ch[1].0, ch[1].1), bl(ch[2].0, ch[2].1), Color::from_rgba(205, 210, 214, 255));
+        draw_triangle(ch0, bl(ch[2].0, ch[2].1), bl(ch[3].0, ch[3].1), Color::from_rgba(205, 210, 214, 255));
         for i in 0..4 {
-            let a = bl(wh[i].0, wh[i].1);
-            let b = bl(wh[(i + 1) % 4].0, wh[(i + 1) % 4].1);
+            let a = bl(ch[i].0, ch[i].1);
+            let b = bl(ch[(i + 1) % 4].0, ch[(i + 1) % 4].1);
             draw_line(a.x, a.y, b.x, b.y, (0.1 * scale).max(1.0), hull_line);
         }
-        let wsa = bl(-0.8, 0.9);
-        let wsb = bl(-0.8, -0.9);
-        draw_line(wsa.x, wsa.y, wsb.x, wsb.y, (0.3 * scale).max(2.0), Color::from_rgba(70, 110, 130, 255));
-        let mast = bl(-2.2, 0.0);
+
+        // Cockpit: open well aft of the coachroof, outline only (nothing to
+        // fill — it's a recess, not a structure).
+        let cp = [(-2.6, 0.9), (-4.3, 0.9), (-4.3, -0.9), (-2.6, -0.9)];
+        for i in 0..4 {
+            let a = bl(cp[i].0, cp[i].1);
+            let b = bl(cp[(i + 1) % 4].0, cp[(i + 1) % 4].1);
+            draw_line(a.x, a.y, b.x, b.y, (0.1 * scale).max(1.0), hull_line);
+        }
+
+        // Sprayhood: a small hood over the companionway at the coachroof's
+        // aft edge, raked to a point forward — this is the actual source
+        // of the bow/stern windage asymmetry in sim-core: a headwind meets
+        // this point and deflects, a following wind finds the open aft
+        // mouth instead and scoops into it.
+        let sh_front = bl(-2.2, 0.0);
+        let sh_l = bl(-3.0, 0.8);
+        let sh_r = bl(-3.0, -0.8);
+        draw_triangle(sh_front, sh_l, sh_r, Color::from_rgba(70, 110, 130, 255));
+
+        // Mast (stepped forward of the coachroof) + boom laid along the
+        // centreline — both present even with the sail furled/down.
+        let mast = bl(0.6, 0.0);
+        let boom_end = bl(-2.0, 0.0);
+        draw_line(mast.x, mast.y, boom_end.x, boom_end.y, (0.08 * scale).max(1.0), hull_line);
         draw_circle(mast.x, mast.y, (0.18 * scale).max(1.5), hull_line);
 
         // --- HUD ---------------------------------------------------------
