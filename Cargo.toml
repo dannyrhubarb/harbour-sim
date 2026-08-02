@@ -1,0 +1,25 @@
+[package]
+name = "harbour-sim"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[workspace]
+members = ["sim-core"]
+
+[dependencies]
+# The deterministic core (boat/harbour physics) lives in its own
+# macroquad-free crate, following the Pegasus architecture: it keeps the sim
+# reusable for server-side verification / headless testing later.
+harbour-sim-core = { path = "sim-core" }
+# Pinned exact: sim-core pins glam to the version macroquad 0.4.15
+# re-exports so Vec2 unifies across the crate boundary. Upgrade the two
+# together, deliberately.
+macroquad = "=0.4.15"
+
+[profile.release]
+# Tuned for wasm size (the deploy artifact), same as Pegasus.
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

@@ -1,0 +1,154 @@
+# Harbour Sim — mooring simulator
+
+Rust + macroquad 0.4.15 + Rapier 2D, compiled to WebAssembly and served via
+GitHub Pages. Top-down simulator of a boat in a harbour: currently a proof of
+concept — the boat lies alongside a fixed quay under adjustable wind and
+current. The goal is mooring manoeuvres with placeable ropes (bow/stern
+lines, springs) under different conditions; ropes, scenarios and scoring are
+future work.
+
+Boilerplate and pipeline are copied from **dannyrhubarb/pegasus** (2026-08) —
+when in doubt about a pattern or a CI gotcha, that repo's CLAUDE.md is the
+richer reference; anything imported here follows the same rules.
+
+> **Keep this file current.** Update CLAUDE.md as part of every commit that
+> changes architecture, adds a system, renames constants, fixes a gotcha, or
+> reveals a lesson. Don't batch it up.
+
+## Build & deploy
+```bash
+cargo build               # native dev build (opens a window when run)
+cargo test --workspace    # --workspace is required or sim-core's tests are skipped
+cargo clippy --workspace --all-targets -- -D warnings   # CI gate
+cargo check --target wasm32-unknown-unknown             # what actually deploys
+```
+Deploy is automatic: any push to `main` triggers `.github/workflows/deploy.yml`.
+One-time repo setup: **Settings → Pages → Source = "GitHub Actions"** (do NOT
+switch it to the `gh-pages` branch — that bypasses the pipeline and serves the
+branch with Jekyll defaults).
+
+### Deploy pipeline & PR previews (inherited from Pegasus)
+The published site lives on the **`gh-pages` state branch**: the `main` build
+at the root, one per-PR preview in `pr-<n>/` (served at
+`https://<owner>.github.io/harbour-sim/pr-<n>/` — asset URLs in `index.html`
+are relative, which is what makes subdirectory serving work). Four workflows,
+sharing two composite actions (`.github/actions/build-site` = wasm build +
+icons + revision injection; `.github/actions/sync-pages-branch` = commit into
+`gh-pages` with a push-retry loop for concurrent deploys):
+- `deploy.yml` (**Main deploy**, push to `main`): build → sync branch root
+  (live `pr-*/` previews are kept).
+- `preview-deploy.yml` (**Preview deploy**, PR opened/synchronize/reopened):
+  build (revision label `<head-sha>-pr-<n>`) → sync `pr-<n>/` → sticky PR
+  comment (`<!-- preview-env -->` marker) with the preview URL. Skipped for
+  fork PRs (read-only token).
+- `preview-teardown.yml` (**Preview teardown**, PR closed): delete `pr-<n>/`.
+- `publish-pages.yml` (**Publish Pages**): the *only* workflow that calls
+  `deploy-pages`. Triggered by `workflow_run` on the three above (must match
+  their `name:` strings exactly — a workflow that pushes to `gh-pages`
+  without being listed here lands on the branch and is never deployed).
+  **Gotcha (from Pegasus)**: the auto-created `github-pages` environment only
+  allows deployments from `main`, so PR-triggered workflows can't deploy
+  directly; `workflow_run` workflows execute from the default branch, which
+  passes the protection. Also: pushes made with `GITHUB_TOKEN` don't trigger
+  `push` workflows (recursion guard), so an `on: push: branches: [gh-pages]`
+  publisher would never fire — `workflow_run` is load-bearing. The Pages API
+  intermittently rejects rapid-succession deployments, so the deploy step
+  retries once after 30 s.
+  **Gotcha (learned here, 2026-08-02)**: `workflow_run` triggers only fire
+  if the workflow file exists on the DEFAULT branch. On this then-new repo,
+  `main` was an empty root while the boilerplate PR was open — preview
+  deploys completed but nothing ever published, and the Pages site 404'd.
+  Publish Pages only checks out `gh-pages` (no game code), so its copy was
+  committed straight to `main` ahead of the first merge; **keep the `main`
+  and feature-branch copies identical** so merges are a no-op for it. It
+  also carries a `workflow_dispatch` escape hatch (the job's `if:` passes it
+  explicitly) to republish the current `gh-pages` state on demand.
+
+`ci.yml` runs on PRs: wasm `cargo check`, clippy `-D warnings`, tests.
+
+## Project structure
+- `sim-core/` — the **`harbour-sim-core` library crate** (workspace member):
+  the whole deterministic half. **Nothing in it may depend on macroquad or
+  any nondeterminism**; it uses `glam` (pinned to the version macroquad
+  0.4.15 re-exports, so `Vec2` unifies across the boundary) + `rapier2d`.
+  - `sim-core/src/sim.rs` — `Sim` (Rapier world: quay + basin walls, the
+    boat), `Env` (wind/current), all physics constants, harbour geometry
+    constants, unit tests.
+- `src/main.rs` — macroquad frontend: input, fixed-timestep loop with render
+  interpolation, top-down rendering (water/ripples, quay, breakwaters, boat),
+  HUD (wind/current indicators, SOG readout, key help).
+- `index.html` — web wrapper: boot guard (standalone script ahead of the
+  bundle that paints script errors on screen), loading overlay,
+  `__GIT_REVISION__` placeholder (deploy-time sed → wasm `?v=` cache-buster).
+- `mq_js_bundle.js` — **vendored** miniquad/quad-snd JS loader (same build as
+  Pegasus). Pinned in-repo so deploys don't depend on a third-party host.
+  **Gotcha**: it declares top-level globals (`const canvas`, `var gl`,
+  `wasm_exports`, `function load`, …) that share the page's global scope —
+  redeclaring any of them in `index.html`'s inline script is a SyntaxError
+  that silently kills the whole inline script. Pick distinct names.
+- `icon.svg` — source for the PNG icons rendered at deploy time
+  (`rsvg-convert` in build-site).
+
+## Simulation model (sim-core/src/sim.rs)
+
+Top-down 2D, world units are metres, y = north (up on screen), x = east.
+No gravity — the projected-away vertical is replaced by hydrodynamic drag,
+wind load, and quay contact. Fixed timestep `PHYSICS_DT = 1/120 s`, advanced
+ONLY by `Sim::tick(&Env)`; the frontend runs an accumulator with render
+interpolation (`lerp` + shortest-path angle lerp) like Pegasus.
+
+- **Harbour**: a straight quay wall along `y = QUAY_Y` (water below), three
+  breakwater walls closing the basin (`BASIN_HALF_W`, `BASIN_BOTTOM_Y`).
+  All static segment colliders, inserted in a FIXED order (handle numbering
+  must be deterministic). Fender feel via friction 0.5 / restitution 0.1.
+- **Boat**: one dynamic body, convex-hull collider of `HULL_PTS` (bow = +x
+  local, ~12 m × 3.8 m, ~7.5 t via `HULL_DENSITY`). `HULL_PTS` is shared
+  with the renderer, so **visuals match collision exactly** (the Pegasus
+  alignment rule).
+- **Env** (`wind_from_deg`, `wind_speed`, `current_to_deg`, `current_speed`):
+  compass convention 0° = north = +y, 90° = east = +x. Wind is named by
+  where it blows FROM (mariners' convention), current by where it sets
+  TOWARD. Passed to `tick` per call like an input stream — it's the future
+  recording format's input half.
+- **Hydrodynamics**: quadratic + linear drag on the velocity RELATIVE TO THE
+  WATER, split into surge (easy) / sway (hard) components via the real
+  ρ·Cd·A formulas — a uniform current is just "the water moves", so the same
+  term both damps the boat and carries it along. The **linear terms are
+  deliberate**: quadratic drag vanishes at low speed, so alone it neither
+  stops a creeping boat nor converges to current speed; world-frame Rapier
+  damping would fight the current instead (holds the boat below water
+  speed), so all drag lives in `tick`, relative to the water, and the body's
+  Rapier damping is 0.
+- **Force application points create the characteristic behaviours**: lateral
+  water force acts slightly AFT of centre (`WATER_CLR_OFFSET < 0`, keel/skeg
+  → weathervanes bow-into-current); lateral wind force slightly FORWARD
+  (`WIND_CENTER_OFFSET > 0`, bow windage → the bow falls off downwind).
+  Tune behaviour there, not with fudge torques.
+- **Determinism rules (inherited verbatim from Pegasus)**: fresh `Sim` per
+  run — never reuse one across runs (Rapier handle numbering / warm-start
+  caches); all forces inside `tick` only; no wall clock, no `gen_range`, no
+  macroquad in sim-core. `same_env_sequence_is_bit_identical` unit-tests the
+  property that will make replays possible.
+
+## Frontend conventions (src/main.rs)
+- Fixed view: the camera letterboxes a `VIEW_W × VIEW_H` metre rectangle;
+  `w2s` closure converts world → screen px (y inverted).
+- `ui` scale for HUD text follows the Pegasus formula
+  (`(sw.min(sh)/dpi/980).min(1) * dpi`); `high_dpi: true` in `window_conf`.
+- Cosmetic-only nondeterminism is allowed render-side (the water ripples use
+  `get_time()`); nothing cosmetic may feed back into the sim.
+- Controls: ←/→ wind dir, ↑/↓ wind speed, A/D current dir, W/S current
+  speed, R reset (reset = `Sim::new()`, never an in-place teleport).
+
+## Roadmap (agreed direction, not yet built)
+- **Ropes**: placeable mooring lines (bow/stern/springs) — each a constraint
+  or spring force between a hull fairlead and a quay bollard, applied inside
+  `tick` from a future `InputState`. Then: engine/rudder, scenarios
+  (approach, spring off a lee quay, …), touch controls, recordings/replays
+  (the Pegasus hybrid format), scoring.
+
+## Git workflow
+- Development branch: `claude/harbour-sim-boilerplate-j8j8lj` (current).
+- Same rules as Pegasus: curate branches before rebase-merging to `main`;
+  the wasm binary is **not tracked** (gitignored) — deploy builds it from
+  source; `git fetch origin main && git rebase origin/main` before PRs.

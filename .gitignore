@@ -1,0 +1,8 @@
+# Build products
+/target
+/site
+harbour-sim.wasm
+icon-*.png
+
+# gh-pages sync worktree (composite action scratch)
+.gh-pages-wt

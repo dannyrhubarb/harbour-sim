@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Harbour Sim app icon: a boat at a quay on dark water.
+       Rendered to PNG at deploy time (rsvg-convert in build-site). -->
+  <rect width="512" height="512" rx="96" fill="#091a26"/>
+  <!-- water -->
+  <rect x="0" y="300" width="512" height="212" fill="#103042"/>
+  <!-- wave lines -->
+  <g stroke="#78aabe" stroke-width="10" stroke-linecap="round" opacity="0.55" fill="none">
+    <path d="M40 372 q28 -16 56 0 t56 0"/>
+    <path d="M300 372 q28 -16 56 0 t56 0"/>
+    <path d="M120 436 q28 -16 56 0 t56 0 t56 0"/>
+  </g>
+  <!-- quay on the right -->
+  <rect x="400" y="180" width="112" height="140" fill="#585c63"/>
+  <rect x="400" y="180" width="14" height="140" fill="#3c3f44"/>
+  <circle cx="470" cy="210" r="12" fill="#1e2024"/>
+  <!-- hull (side view) -->
+  <path d="M96 300 L376 300 L344 356 L136 356 Z" fill="#e6e2d4"/>
+  <path d="M96 300 L376 300 L370 312 L102 312 Z" fill="#c9c4b2"/>
+  <!-- wheelhouse -->
+  <rect x="220" y="238" width="92" height="62" rx="8" fill="#b2b6bc"/>
+  <rect x="232" y="252" width="68" height="22" rx="4" fill="#466e82"/>
+  <!-- mast -->
+  <rect x="196" y="196" width="8" height="104" fill="#2a2c30"/>
+  <circle cx="200" cy="190" r="10" fill="#ffc24b"/>
+</svg>
