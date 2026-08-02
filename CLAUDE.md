@@ -198,12 +198,18 @@ interpolation (`lerp` + shortest-path angle lerp) like Pegasus.
   change). The HUD layout adds them to its margins; native builds stay 0.
 - Cosmetic-only nondeterminism is allowed render-side (the water ripples use
   `get_time()`); nothing cosmetic may feed back into the sim.
-- Controls: touch/mouse = drag the dials + RESET button; keyboard = ←/→
-  wind dir, ↑/↓ wind speed, A/D current dir, W/S current speed, R reset
+- Controls: touch/mouse = drag the dials + RESET/KEEL buttons; keyboard =
+  ←/→ wind dir, ↑/↓ wind speed, A/D current dir, W/S current speed, R reset
   (reset = `respawn(&keel_profile)`, a fresh `Sim::new_with_keel`, never an
   in-place teleport; env is kept), K keel design editor (freezes physics —
   all input and the physics tick, not just rendering — while open; see
-  `src/keel_editor.rs`).
+  `src/keel_editor.rs`). The KEEL button exists because K has no touch
+  equivalent otherwise — without it there'd be no way to reach the editor
+  on a touch-only device. Once open, the editor itself takes touch input
+  too (`KeelEditor::update`'s own `touches()` handling, independent of the
+  HUD's — mirrors the same fresh-touch-id pattern as the dials, since
+  `simulate_mouse_with_touch(false)` means touches never synthesize a
+  mouse press).
 
 ## Roadmap (agreed direction, not yet built)
 - **Ropes**: placeable mooring lines (bow/stern/springs) — each a constraint

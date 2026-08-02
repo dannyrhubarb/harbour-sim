@@ -187,11 +187,23 @@ async fn main() {
             reset_w,
             reset_h,
         );
+        // Keel editor button, left of RESET — the touch/mouse twin of the K
+        // key. Without this there's no way to reach the editor at all on a
+        // touch-only device (no keyboard).
+        let keel_w = fs * 4.6;
+        let keel_h = fs * 2.2;
+        let keel_rect = Rect::new(
+            reset_rect.x - margin - keel_w,
+            sh - sa_b - margin - keel_h,
+            keel_w,
+            keel_h,
+        );
 
         if !editor.active {
             let mut do_reset = is_key_pressed(KeyCode::R);
+            let mut do_open_editor = false;
 
-            // --- Touch input: dial drags + reset taps ---------------------
+            // --- Touch input: dial drags + reset/keel taps -----------------
             let ts = touches();
             let cur_ids: Vec<u64> = ts.iter().map(|t| t.id).collect();
             for t in &ts {
@@ -211,6 +223,8 @@ async fn main() {
                         current_claim = Some(t.id);
                     } else if reset_rect.contains(p) {
                         do_reset = true;
+                    } else if keel_rect.contains(p) {
+                        do_open_editor = true;
                     }
                 }
                 if wind_claim == Some(t.id) {
@@ -240,6 +254,8 @@ async fn main() {
                     mouse_claim = Some(1);
                 } else if reset_rect.contains(mp) {
                     do_reset = true;
+                } else if keel_rect.contains(mp) {
+                    do_open_editor = true;
                 }
             }
             if is_mouse_button_down(MouseButton::Left) {
@@ -292,6 +308,10 @@ async fn main() {
                 // Fresh Sim per run — never reuse one (determinism rule).
                 (sim, prev_pos, prev_heading, cur_pos, cur_heading) = respawn(&keel_profile);
                 accum = 0.0;
+            }
+            if do_open_editor {
+                editor.load(&keel_profile);
+                editor.active = true;
             }
 
             // --- Fixed-timestep physics with render interpolation. ---------
@@ -521,10 +541,29 @@ async fn main() {
             text,
         );
 
+        // Keel editor button (bottom-right, left of RESET) — the
+        // touch/mouse twin of the K key.
+        draw_rectangle(
+            keel_rect.x,
+            keel_rect.y,
+            keel_rect.w,
+            keel_rect.h,
+            Color::from_rgba(10, 20, 30, 170),
+        );
+        draw_rectangle_lines(keel_rect.x, keel_rect.y, keel_rect.w, keel_rect.h, 2.0, dim);
+        let kl = measure_text("KEEL", None, fs as u16, 1.0);
+        draw_text(
+            "KEEL",
+            keel_rect.x + (keel_rect.w - kl.width) * 0.5,
+            keel_rect.y + keel_rect.h * 0.5 + fs * 0.35,
+            fs,
+            text,
+        );
+
         // Hints, bottom-left. Keyboard lines only where a keyboard is
         // likely (wide screens); ASCII only — the built-in font has no
         // arrow glyphs.
-        let mut help: Vec<&str> = vec!["drag the dials to set wind & current"];
+        let mut help: Vec<&str> = vec!["drag the dials to set wind & current, tap KEEL to design"];
         if sw >= 700.0 {
             help.push("keys: arrows = wind, A/D+W/S = current, R = reset, K = keel editor");
         }

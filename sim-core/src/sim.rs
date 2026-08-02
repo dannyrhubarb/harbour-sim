@@ -77,6 +77,15 @@ const CD_WATER_FRONT: f32 = 0.5;
 const CD_AIR_LAT: f32 = 1.0;
 const CD_AIR_FRONT: f32 = 0.7;
 
+/// Yaw damping coefficient (N·m per (rad/s)²) for a keel's cubic moment
+/// (see `KeelDerived::cubic_moment`). Exposed so the keel editor's live
+/// readout stays derived from the same `RHO_WATER`/`CD_WATER_LAT` source
+/// of truth as `tick` uses, instead of keeping its own copy of the formula
+/// (and the constants) that could silently go stale if either changed here.
+pub fn yaw_damping_coefficient(cubic_moment: f32) -> f32 {
+    0.5 * RHO_WATER * CD_WATER_LAT * cubic_moment
+}
+
 // Linear drag terms, also relative to the water. Quadratic drag vanishes at
 // low speed, so on its own the boat would creep forever; a linear term makes
 // it converge — to a stop in still water, to the current's own velocity in a
@@ -318,7 +327,7 @@ impl Sim {
         // the water resists the hull sweeping around its own axis more than
         // it resists straight sway, because points far from the pivot move
         // faster during rotation and drag is quadratic in speed.
-        let c_yaw_q = 0.5 * RHO_WATER * CD_WATER_LAT * self.keel.cubic_moment;
+        let c_yaw_q = yaw_damping_coefficient(self.keel.cubic_moment);
         rb.add_torque(-(c_yaw_q * w * w.abs() + K_LIN_YAW * w), true);
 
         // --- Wind load: air moving relative to the hull/superstructure.
