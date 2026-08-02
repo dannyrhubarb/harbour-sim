@@ -86,6 +86,7 @@ future Contributions to the Project.
 Maintainers:
 
 - Daniel Falk (@dannyrhubarb)
+- Daniel Freiermuth (@daniel-freiermuth)
 
 Contributors:
 
