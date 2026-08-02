@@ -36,6 +36,17 @@ pub struct KeelDerived {
     /// torque contribution scales as `x · (w·x)|w·x| ∝ x^3`. The yaw
     /// damping coefficient is `0.5 * RHO_WATER * CD_WATER_LAT * cubic_moment`.
     pub cubic_moment: f32,
+    /// `∫ a(x) x·|x| dx` (m^4), SIGNED: the strips resisting a spin don't
+    /// pull symmetrically when the area is biased fore/aft, so rotation
+    /// produces a net SIDE FORCE, not just the damping torque above — e.g.
+    /// spin an aft-biased hull clockwise and the stern (big area, sweeping
+    /// to port) out-drags the bow (small area, sweeping to starboard),
+    /// shoving the whole boat to starboard and putting the effective centre
+    /// of rotation aft of the centre of mass. Zero for a fore-aft symmetric
+    /// profile. This is the reciprocal twin of `clr_offset`: that one says
+    /// sway creates torque, this one says rotation creates sway force —
+    /// the two off-diagonal couplings of the same damping matrix.
+    pub swept_moment: f32,
 }
 
 impl KeelProfile {
@@ -46,6 +57,7 @@ impl KeelProfile {
         let mut area = 0.0f32;
         let mut first_moment = 0.0f32;
         let mut cubic_moment = 0.0f32;
+        let mut swept_moment = 0.0f32;
         for w in self.points.windows(2) {
             let (x0, a0) = (w[0].x, w[0].y);
             let (x1, a1) = (w[1].x, w[1].y);
@@ -64,10 +76,11 @@ impl KeelProfile {
                 area += 0.5 * (aa + ab) * h;
                 first_moment += 0.5 * (xa * aa + xb * ab) * h;
                 cubic_moment += 0.5 * (xa.abs().powi(3) * aa + xb.abs().powi(3) * ab) * h;
+                swept_moment += 0.5 * (xa * xa.abs() * aa + xb * xb.abs() * ab) * h;
             }
         }
         let clr_offset = if area > 1e-6 { first_moment / area } else { 0.0 };
-        KeelDerived { area, clr_offset, cubic_moment }
+        KeelDerived { area, clr_offset, cubic_moment, swept_moment }
     }
 
     /// Linear interpolation at an arbitrary `x`, clamped to the endpoint
@@ -179,6 +192,8 @@ mod tests {
         let d = profile.derive();
         assert!((d.area - 2.0 * a * h).abs() < 1e-3);
         assert!(d.clr_offset.abs() < 1e-4);
+        // Fore-aft symmetry also kills the rotation→side-force coupling.
+        assert!(d.swept_moment.abs() < 1e-3);
         let expected_cubic = h * a.powi(4) / 2.0;
         assert!(
             (d.cubic_moment - expected_cubic).abs() < expected_cubic * 0.02,
@@ -195,6 +210,13 @@ mod tests {
         };
         let d = profile.derive();
         assert!(d.clr_offset < -4.5, "expected a strongly aft offset, got {}", d.clr_offset);
+        // All the area sits at negative x, so the signed x·|x| moment must
+        // be negative too: ∫1·x·|x| dx from -6 to -4 = ((-4)³-(-6)³)/3 = 50.67 aft.
+        assert!(
+            (d.swept_moment - (-50.67)).abs() < 0.5,
+            "expected swept_moment ≈ -50.67, got {}",
+            d.swept_moment
+        );
     }
 
     #[test]

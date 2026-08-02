@@ -288,6 +288,14 @@ impl Sim {
         (Vec2::new(v.x, v.y), rb.angvel())
     }
 
+    /// Test-only initial condition: give the boat a spin. Setting an
+    /// initial state before the first tick is not the same as mutating
+    /// physics mid-run (which stays forbidden — determinism rule).
+    #[cfg(test)]
+    fn set_yaw_rate(&mut self, w: f32) {
+        self.bodies[self.boat].set_angvel(w, true);
+    }
+
     /// Advance one fixed step under the given environment. All forces are
     /// recomputed here from the boat state + `env` — nothing outside `tick`
     /// may touch the physics (the Pegasus determinism rule).
@@ -329,6 +337,21 @@ impl Sim {
         // faster during rotation and drag is quadratic in speed.
         let c_yaw_q = yaw_damping_coefficient(self.keel.cubic_moment);
         rb.add_torque(-(c_yaw_q * w * w.abs() + K_LIN_YAW * w), true);
+
+        // Rotation-induced SIDE FORCE (the torque above's inseparable twin):
+        // the strips resisting the spin don't pull symmetrically when the
+        // area is biased fore/aft. A strip at position x sweeps sideways at
+        // w·x, so its drag is ∝ a(x)·(w·x)|w·x|; summed along the hull the
+        // net sway force is -0.5·ρ·Cd·w|w|·∫a(x)·x|x|dx (the profile's
+        // signed swept_moment). For an aft-biased keel spun clockwise the
+        // stern out-drags the bow and shoves the boat to starboard, which
+        // is what puts the effective centre of rotation aft of the centre
+        // of mass. Applied through the centre (the couple component is
+        // already the torque above); sway↔yaw cross terms are neglected,
+        // consistent with the sway/yaw drag split.
+        let f_spin =
+            -side * (0.5 * RHO_WATER * CD_WATER_LAT * w * w.abs() * self.keel.swept_moment);
+        rb.add_force(vector![f_spin.x, f_spin.y], true);
 
         // --- Wind load: air moving relative to the hull/superstructure.
         let ar = env.wind_vel() - v;
@@ -467,5 +490,46 @@ mod tests {
         assert!(pos.y > QUAY_Y - half_beam - 1.0, "boat never reached the quay: y = {}", pos.y);
         let (v, _) = sim.boat_vel();
         assert!(v.length() < 0.2, "boat still moving {} m/s against the wall", v.length());
+    }
+
+    #[test]
+    fn spinning_an_aft_biased_hull_shoves_it_to_starboard() {
+        // Rotational drag over a fore/aft-asymmetric area distribution is
+        // not a pure torque: spin the default (aft-biased) hull clockwise
+        // and the stern (big area, sweeping to port) out-drags the bow
+        // (small area, sweeping to starboard) — net side force to
+        // starboard, which is what puts the effective centre of rotation
+        // aft of the centre of mass. At heading 0 (bow = +x east, port =
+        // +y), clockwise = negative yaw rate and starboard = -y. Checked
+        // over a fraction of a second so the heading (and with it the
+        // force direction) hasn't swung far from its initial orientation.
+        let mut sim = Sim::new();
+        sim.set_yaw_rate(-1.0);
+        for _ in 0..12 {
+            sim.tick(&Env::CALM);
+        }
+        let (v, _) = sim.boat_vel();
+        assert!(
+            v.y < -0.02,
+            "expected a clear starboard (-y) drift from the spin, got vy = {}",
+            v.y
+        );
+
+        // Control: a fore-aft symmetric profile has no such coupling — the
+        // same spin produces no appreciable sideways drift.
+        let symmetric = KeelProfile {
+            points: vec![Vec2::new(-6.0, 1.0), Vec2::new(6.0, 1.0)],
+        };
+        let mut sym = Sim::new_with_keel(&symmetric);
+        sym.set_yaw_rate(-1.0);
+        for _ in 0..12 {
+            sym.tick(&Env::CALM);
+        }
+        let (vs, _) = sym.boat_vel();
+        assert!(
+            vs.length() < 0.005,
+            "symmetric profile should not drift from a pure spin, got |v| = {}",
+            vs.length()
+        );
     }
 }
