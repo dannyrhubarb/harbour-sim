@@ -103,7 +103,7 @@
   <script>
     // Deploy-time injected revision (build-site sed). Local dev keeps the
     // placeholder — then no cache-buster is appended.
-    const wasmRev = "fb87813-pr-8";
+    const wasmRev = "b9dd87d-pr-8";
     if (!wasmRev.startsWith("__")) {
       document.getElementById("rev-line").textContent = "build " + wasmRev;
     }
