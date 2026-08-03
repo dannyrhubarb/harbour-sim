@@ -169,9 +169,10 @@ icons + revision injection; `.github/actions/sync-pages-branch` = commit into
 
 Top-down 2D, world units are metres, y = north (up on screen), x = east.
 No gravity — the projected-away vertical is replaced by hydrodynamic drag,
-wind load, and quay contact. Fixed timestep `PHYSICS_DT = 1/120 s`, advanced
-ONLY by `Sim::tick(&Env)`; the frontend runs an accumulator with render
-interpolation (`lerp` + shortest-path angle lerp) like Pegasus.
+wind load, propulsion, and quay contact. Fixed timestep `PHYSICS_DT =
+1/120 s`, advanced ONLY by `Sim::tick(&Env, &InputState)`; the frontend runs
+an accumulator with render interpolation (`lerp` + shortest-path angle lerp)
+like Pegasus.
 
 - **Harbour**: a straight quay wall along `y = QUAY_Y` (water below), three
   breakwater walls closing the basin (`BASIN_HALF_W`, `BASIN_BOTTOM_Y`).
@@ -188,8 +189,35 @@ interpolation (`lerp` + shortest-path angle lerp) like Pegasus.
 - **Env** (`wind_from_deg`, `wind_speed`, `current_to_deg`, `current_speed`):
   compass convention 0° = north = +y, 90° = east = +x. Wind is named by
   where it blows FROM (mariners' convention), current by where it sets
-  TOWARD. Passed to `tick` per call like an input stream — it's the future
-  recording format's input half.
+  TOWARD. Passed to `tick` per call like an input stream — together with
+  `InputState` it's the future recording format's complete input.
+- **InputState** (`throttle`, `rudder`, both -1..=1, `InputState::NEUTRAL`):
+  the helm/engine half of the input stream, passed to `tick` alongside
+  `Env`. `rudder` is sign-conventioned as HELM: positive = the boat turns
+  to starboard (the blade deflects the other way). Both fields are clamped
+  defensively at the top of `tick` so a corrupt recording can't command
+  super-physical inputs.
+- **Engine & propeller** (~28 hp auxiliary, fixed right-handed 3-blade
+  prop): thrust acts at `PROP_X` (local −5.6 m). `Sim.engine` is the
+  telegraph filtered by a first-order lag (`THROTTLE_TAU` 0.4 s) — sim
+  STATE, not input, advanced only inside `tick` and reset for free by the
+  fresh-`Sim`-per-run rule (`engine_spools_rather_than_steps`). Thrust =
+  `T_max·n|n|·clamp(1 − adv·|adv|, -1, 2)` with `adv = surge·sign(n)/
+  (|n|·U_PROP_RACE)` — bollard 4200 N ahead (~0.2 kN/kW rule), ×
+  `ASTERN_RATIO` 0.6 astern, equilibria ≈ 3.2 m/s full ahead / 1.5 m/s
+  half / 1.9 m/s astern (`full_throttle_equilibrium_speed_is_bracketed`,
+  `astern_is_weaker_than_ahead`); the clamp bounds the windmilling brake
+  and the crash-stop bite. **Prop walk** is a side force at the prop ∝
+  |thrust|: `PROP_WALK_AHEAD` 0.06 (stern nudges starboard) vs
+  `PROP_WALK_ASTERN` 0.13 (stern kicks port — "backs to port",
+  `a_burst_astern_walks_the_stern_to_port`).
+- **Axial water drag is asymmetric fore/aft** like the windage below:
+  `CD_WATER_BOW` 0.15 (fine entry) vs `CD_WATER_STERN` 0.35 (transom
+  first), selected by the sign of the water-relative surge. The old single
+  `CD_WATER_FRONT = 0.5` was a blunt-body placeholder tuned before anything
+  could drive the boat — against it no realistic bollard pull passes
+  ~1.9 m/s, so it was retuned when the engine arrived (the equilibrium math
+  lives with the thrust constants).
 - **Hydrodynamics**: quadratic + linear drag on the velocity RELATIVE TO THE
   WATER, split into surge (easy) / sway (hard) components via the real
   ρ·Cd·A formulas — a uniform current is just "the water moves", so the same
@@ -242,8 +270,9 @@ interpolation (`lerp` + shortest-path angle lerp) like Pegasus.
 - **Determinism rules (inherited verbatim from Pegasus)**: fresh `Sim` per
   run — never reuse one across runs (Rapier handle numbering / warm-start
   caches); all forces inside `tick` only; no wall clock, no `gen_range`, no
-  macroquad in sim-core. `same_env_sequence_is_bit_identical` unit-tests the
-  property that will make replays possible.
+  macroquad in sim-core. `same_input_sequence_is_bit_identical` unit-tests
+  the property that will make replays possible (scripting `Env` AND
+  `InputState`, so the engine spool state is covered too).
 
 ## Frontend conventions (src/main.rs)
 - **Mobile-first UI**: design and test every UI feature for touch/phone

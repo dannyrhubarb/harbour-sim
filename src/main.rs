@@ -13,7 +13,8 @@
 
 use harbour_sim_core::keel::KeelProfile;
 use harbour_sim_core::sim::{
-    BASIN_BOTTOM_Y, BASIN_HALF_W, Env, HULL_PTS, PHYSICS_DT, QUAY_DEPTH, QUAY_HALF_W, QUAY_Y, Sim,
+    BASIN_BOTTOM_Y, BASIN_HALF_W, Env, HULL_PTS, InputState, PHYSICS_DT, QUAY_DEPTH, QUAY_HALF_W,
+    QUAY_Y, Sim,
 };
 use keel_editor::{EditorAction, EditorButtons, KeelEditor};
 use macroquad::prelude::*;
@@ -319,7 +320,7 @@ async fn main() {
             while accum >= PHYSICS_DT {
                 prev_pos = cur_pos;
                 prev_heading = cur_heading;
-                sim.tick(&env);
+                sim.tick(&env, &InputState::NEUTRAL);
                 (cur_pos, cur_heading) = sim.boat_pose();
                 accum -= PHYSICS_DT;
             }

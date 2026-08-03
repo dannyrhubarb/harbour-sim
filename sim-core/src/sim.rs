@@ -6,11 +6,12 @@
 //! world is projected away; everything that keeps the boat in place is
 //! hydrodynamic drag, aerodynamic (wind) load, and contact with the quay.
 //!
-//! Everything physical is advanced ONLY by `Sim::tick(&Env)` at a fixed
-//! `PHYSICS_DT`. The environment (`Env`) is passed per tick like an input
-//! stream — same env sequence + fresh `Sim` => bit-identical trajectory
-//! (unit-tested), which is what will make recordings/replays possible later
-//! exactly like Pegasus.
+//! Everything physical is advanced ONLY by `Sim::tick(&Env, &InputState)`
+//! at a fixed `PHYSICS_DT`. The environment (`Env`) and the helm/engine
+//! inputs (`InputState`) are passed per tick like an input stream — same
+//! input sequence + fresh `Sim` => bit-identical trajectory (unit-tested),
+//! which is what will make recordings/replays possible later exactly like
+//! Pegasus.
 
 use crate::keel::{KeelDerived, KeelProfile};
 use glam::Vec2;
@@ -78,7 +79,16 @@ const WIND_AREA_FRONT: f32 = 7.0;
 
 // Drag coefficients.
 const CD_WATER_LAT: f32 = 1.1;
-const CD_WATER_FRONT: f32 = 0.5;
+// Axial water drag is asymmetric like the axial windage below: bow-first is
+// a fair entry that parts the water (a hull's frontal-area Cd is far below a
+// blunt body's), stern-first drags the flat transom through it. The old
+// single CD_WATER_FRONT = 0.5 was a blunt-body placeholder tuned before
+// anything could drive the boat; against it no realistic bollard pull gets
+// past ~1.9 m/s, so it was retuned when the engine arrived (equilibrium
+// math on the thrust constants below). Selected by the sign of the
+// water-relative surge in `tick`.
+const CD_WATER_BOW: f32 = 0.15;
+const CD_WATER_STERN: f32 = 0.35;
 const CD_AIR_LAT: f32 = 1.0;
 // Axial windage isn't symmetric fore/aft the way the water-drag terms are:
 // the bow is a fine entry with a sprayhood shaped to deflect airflow when
@@ -139,6 +149,40 @@ pub const START_POS: (f32, f32) = (0.0, QUAY_Y - 2.4);
 pub const START_HEADING: f32 = 0.0;
 
 // ---------------------------------------------------------------------------
+// Engine & propeller
+// ---------------------------------------------------------------------------
+
+// A ~28 hp auxiliary diesel (≈21 kW shaft) with a fixed 3-blade prop, at the
+// ~0.2 kN-per-kW bollard-pull rule of thumb. Equilibrium against the surge
+// drag above (230.6·u² + 200·u, bow-first) with the advance-speed falloff
+// below: full ahead ≈ 3.2 m/s (6.2 kn), half throttle ≈ 1.5 m/s — a boat
+// that motors below hull speed, as auxiliaries do.
+const T_BOLLARD_AHEAD: f32 = 4200.0; // N
+// A prop pitched for ahead delivers much less astern; also keeps the astern
+// equilibrium (~1.9 m/s against the blunt transom's CD_WATER_STERN) sane.
+const ASTERN_RATIO: f32 = 0.6;
+/// Advance speed (m/s) at which a full-throttle prop stops delivering
+/// thrust ("races"). Thrust falls off quadratically in the advance ratio
+/// u/(|n|·U_PROP_RACE), so backing off the throttle lowers both the bollard
+/// thrust AND the speed the falloff bites at, like a real fixed prop.
+const U_PROP_RACE: f32 = 6.0;
+/// Where thrust (and prop walk) act along the hull: just forward of the
+/// transom, aft of the keel. Local x, metres.
+const PROP_X: f32 = -5.6;
+/// First-order engine spool time constant (s): the delivered thrust chases
+/// the telegraph, it doesn't step. Sim state (`Sim::engine`), advanced only
+/// inside `tick` — deterministic.
+const THROTTLE_TAU: f32 = 0.4;
+// Prop walk: a rotating prop's blades bite asymmetrically (deeper blade in
+// denser/slower water, plus the helical wash against the hull), producing a
+// sideways force at the stern proportional to thrust. For the usual
+// right-handed prop the stern walks to STARBOARD ahead (weakly — the rudder
+// wash mostly straightens it) and to PORT astern (strongly — nothing
+// straightens it), the classic "backs to port". Fractions of |thrust|.
+const PROP_WALK_AHEAD: f32 = 0.06;
+const PROP_WALK_ASTERN: f32 = 0.13;
+
+// ---------------------------------------------------------------------------
 // Environment
 // ---------------------------------------------------------------------------
 
@@ -179,6 +223,22 @@ impl Env {
     }
 }
 
+/// Helm + engine inputs for one tick. Together with `Env` this is the
+/// complete input stream of the future recording format: same sequence of
+/// both + fresh `Sim` => bit-identical trajectory.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct InputState {
+    /// Engine telegraph, -1 (full astern) ..= 1 (full ahead).
+    pub throttle: f32,
+    /// Helm, -1 ..= 1. POSITIVE = the boat turns to STARBOARD (helm "to
+    /// starboard"); the rudder blade itself deflects the other way.
+    pub rudder: f32,
+}
+
+impl InputState {
+    pub const NEUTRAL: InputState = InputState { throttle: 0.0, rudder: 0.0 };
+}
+
 // ---------------------------------------------------------------------------
 // Sim
 // ---------------------------------------------------------------------------
@@ -200,6 +260,10 @@ pub struct Sim {
     /// Underwater lateral-area moments (area, CLR lever arm, yaw damping
     /// integral), derived once from a `KeelProfile` at construction.
     keel: KeelDerived,
+    /// Spooled engine response, -1..=1: the throttle input filtered through
+    /// `THROTTLE_TAU`. Sim state (not input) — advanced only inside `tick`,
+    /// reset for free by the fresh-`Sim`-per-run rule.
+    engine: f32,
     /// Ticks advanced since spawn.
     pub ticks: u64,
 }
@@ -297,6 +361,7 @@ impl Sim {
             gravity: vector![0.0, 0.0],
             boat,
             keel,
+            engine: 0.0,
             ticks: 0,
         }
     }
@@ -323,6 +388,12 @@ impl Sim {
         (Vec2::new(v.x, v.y), rb.angvel())
     }
 
+    /// Spooled engine response, -1..=1 (the throttle after `THROTTLE_TAU`
+    /// lag) — read-only, for HUD readouts and cosmetic prop wash.
+    pub fn engine(&self) -> f32 {
+        self.engine
+    }
+
     /// Test-only initial condition: give the boat a spin. Setting an
     /// initial state before the first tick is not the same as mutating
     /// physics mid-run (which stays forbidden — determinism rule).
@@ -331,10 +402,29 @@ impl Sim {
         self.bodies[self.boat].set_angvel(w, true);
     }
 
-    /// Advance one fixed step under the given environment. All forces are
-    /// recomputed here from the boat state + `env` — nothing outside `tick`
-    /// may touch the physics (the Pegasus determinism rule).
-    pub fn tick(&mut self, env: &Env) {
+    /// Test-only initial condition: send the boat along its own heading at
+    /// `u` m/s (negative = making sternway). Same rule as `set_yaw_rate`.
+    #[cfg(test)]
+    fn set_forward_speed(&mut self, u: f32) {
+        let rb = &mut self.bodies[self.boat];
+        let rot = *rb.rotation();
+        rb.set_linvel(vector![rot.re * u, rot.im * u], true);
+    }
+
+    /// Advance one fixed step under the given environment and helm/engine
+    /// inputs. All forces are recomputed here from the boat state + `env` +
+    /// `input` — nothing outside `tick` may touch the physics (the Pegasus
+    /// determinism rule).
+    pub fn tick(&mut self, env: &Env, input: &InputState) {
+        // Clamp defensively: a replayed recording (or a buggy frontend)
+        // must not be able to command super-physical inputs.
+        let throttle = input.throttle.clamp(-1.0, 1.0);
+
+        // Engine spool: delivered response chases the telegraph with a
+        // first-order lag. Advanced here, before the force math, so the
+        // thrust below sees this tick's value deterministically.
+        self.engine += (throttle - self.engine) * (PHYSICS_DT / THROTTLE_TAU);
+
         let rb = &mut self.bodies[self.boat];
         rb.reset_forces(true);
         rb.reset_torques(true);
@@ -353,8 +443,11 @@ impl Sim {
         let vr = v - env.current_vel();
         let surge = vr.dot(fwd);
         let sway = vr.dot(side);
+        // surge > 0: moving bow-first through the water (fine entry);
+        // surge < 0: transom-first (blunt).
+        let cd_water_ax = if surge > 0.0 { CD_WATER_BOW } else { CD_WATER_STERN };
         let f_surge = -fwd
-            * (0.5 * RHO_WATER * CD_WATER_FRONT * WATER_AREA_FRONT * surge * surge.abs()
+            * (0.5 * RHO_WATER * cd_water_ax * WATER_AREA_FRONT * surge * surge.abs()
                 + K_LIN_SURGE * surge);
         let f_sway = -side
             * (0.5 * RHO_WATER * CD_WATER_LAT * self.keel.area * sway * sway.abs()
@@ -402,6 +495,34 @@ impl Sim {
         let wc = pos + fwd * WIND_CENTER_OFFSET;
         rb.add_force_at_point(vector![f_wlat.x, f_wlat.y], point![wc.x, wc.y], true);
 
+        // --- Propulsion: thrust and prop walk at the prop, from the
+        // spooled engine response `n` (not the raw telegraph).
+        let n = self.engine;
+        let thrust = if n.abs() < 0.02 {
+            0.0 // idle/neutral band (also guards the division below)
+        } else {
+            let t_max = if n >= 0.0 { T_BOLLARD_AHEAD } else { T_BOLLARD_AHEAD * ASTERN_RATIO };
+            // Advance ratio proxy: how fast the water already moves through
+            // the disc, relative to what this throttle's rpm can grip.
+            // Positive = advancing with the thrust (unloads the prop),
+            // negative = moving against it (crash stop — loads it up, but
+            // bounded: the clamp caps the windmilling brake at -1× and the
+            // crash-stop bite at 2× bollard).
+            let adv = surge * n.signum() / (n.abs() * U_PROP_RACE);
+            t_max * n * n.abs() * (1.0 - adv * adv.abs()).clamp(-1.0, 2.0)
+        };
+        let prop = pos + fwd * PROP_X;
+        let f_thrust = fwd * thrust;
+        rb.add_force_at_point(vector![f_thrust.x, f_thrust.y], point![prop.x, prop.y], true);
+        // Prop walk (right-handed prop): at heading 0, `side` = port (+y).
+        // Ahead the stern nudges starboard (-side at the stern => bow falls
+        // slightly to port); astern the stern kicks port (+side) — "backs
+        // to port". Applied at the prop, so it is both a side force and the
+        // stern-swinging torque, exactly like the real effect.
+        let walk = if n >= 0.0 { -PROP_WALK_AHEAD } else { PROP_WALK_ASTERN } * thrust.abs();
+        let f_walk = side * walk;
+        rb.add_force_at_point(vector![f_walk.x, f_walk.y], point![prop.x, prop.y], true);
+
         self.physics_pipeline.step(
             &self.gravity,
             &self.integration_params,
@@ -430,10 +551,17 @@ mod tests {
     use super::*;
 
     fn run(sim: &mut Sim, env: &Env, secs: f32) {
+        run_input(sim, env, &InputState::NEUTRAL, secs);
+    }
+
+    fn run_input(sim: &mut Sim, env: &Env, input: &InputState, secs: f32) {
         for _ in 0..(secs / PHYSICS_DT) as u32 {
-            sim.tick(env);
+            sim.tick(env, input);
         }
     }
+
+    const FULL_AHEAD: InputState = InputState { throttle: 1.0, rudder: 0.0 };
+    const FULL_ASTERN: InputState = InputState { throttle: -1.0, rudder: 0.0 };
 
     #[test]
     fn calm_water_boat_stays_put() {
@@ -450,26 +578,39 @@ mod tests {
     }
 
     #[test]
-    fn same_env_sequence_is_bit_identical() {
-        // Fresh sim + same env stream => bit-exact trajectory. This is the
-        // property future replays/verification will rely on.
+    fn same_input_sequence_is_bit_identical() {
+        // Fresh sim + same input stream (env AND helm/engine) => bit-exact
+        // trajectory. This is the property future replays/verification will
+        // rely on; the engine spool state must not break it.
         let script = |t: u64| {
             if t < 600 {
-                Env { wind_from_deg: 200.0, wind_speed: 9.0, ..Env::CALM }
+                (
+                    Env { wind_from_deg: 200.0, wind_speed: 9.0, ..Env::CALM },
+                    InputState { throttle: 1.0, rudder: 0.0 },
+                )
+            } else if t < 1200 {
+                (
+                    Env { wind_from_deg: 200.0, wind_speed: 9.0, ..Env::CALM },
+                    InputState { throttle: 0.5, rudder: 0.7 },
+                )
             } else {
-                Env {
-                    wind_from_deg: 45.0,
-                    wind_speed: 4.0,
-                    current_to_deg: 90.0,
-                    current_speed: 0.8,
-                }
+                (
+                    Env {
+                        wind_from_deg: 45.0,
+                        wind_speed: 4.0,
+                        current_to_deg: 90.0,
+                        current_speed: 0.8,
+                    },
+                    InputState { throttle: -0.8, rudder: -0.3 },
+                )
             }
         };
         let mut a = Sim::new();
         let mut b = Sim::new();
         for t in 0..2400 {
-            a.tick(&script(t));
-            b.tick(&script(t));
+            let (env, input) = script(t);
+            a.tick(&env, &input);
+            b.tick(&env, &input);
         }
         let (pa, ha) = a.boat_pose();
         let (pb, hb) = b.boat_pose();
@@ -544,7 +685,7 @@ mod tests {
         let mut sim = Sim::new();
         sim.set_yaw_rate(-1.0);
         for _ in 0..12 {
-            sim.tick(&Env::CALM);
+            sim.tick(&Env::CALM, &InputState::NEUTRAL);
         }
         let (v, _) = sim.boat_vel();
         assert!(
@@ -561,7 +702,7 @@ mod tests {
         let mut sym = Sim::new_with_keel(&symmetric);
         sym.set_yaw_rate(-1.0);
         for _ in 0..12 {
-            sym.tick(&Env::CALM);
+            sym.tick(&Env::CALM, &InputState::NEUTRAL);
         }
         let (vs, _) = sym.boat_vel();
         assert!(
@@ -594,6 +735,93 @@ mod tests {
             following_speed > head_speed * 1.5,
             "expected a following wind to push noticeably harder than a headwind: \
              following {following_speed} m/s vs headwind {head_speed} m/s"
+        );
+    }
+
+    #[test]
+    fn full_throttle_equilibrium_speed_is_bracketed() {
+        // The thrust curve intersects the surge drag somewhere around
+        // 3.2 m/s (the constants' equilibrium math). The basin is too small
+        // for a long straight run to settle there, so bracket instead:
+        // released below the equilibrium the boat must still be gaining,
+        // released above it it must be losing.
+        let below = {
+            let mut sim = Sim::new();
+            sim.set_forward_speed(2.5);
+            run_input(&mut sim, &Env::CALM, &FULL_AHEAD, 3.0);
+            let (v, _) = sim.boat_vel();
+            v.length()
+        };
+        assert!(below > 2.5, "expected to accelerate from 2.5 m/s at full ahead, got {below}");
+        let above = {
+            let mut sim = Sim::new();
+            sim.set_forward_speed(3.6);
+            run_input(&mut sim, &Env::CALM, &FULL_AHEAD, 3.0);
+            let (v, _) = sim.boat_vel();
+            v.length()
+        };
+        assert!(above < 3.6, "expected to slow from 3.6 m/s at full ahead, got {above}");
+    }
+
+    #[test]
+    fn astern_is_weaker_than_ahead() {
+        // A prop pitched for ahead delivers less astern (ASTERN_RATIO), and
+        // the transom-first drag is blunter than the bow-first drag — both
+        // say the same thing: the boat backs slower than it motors ahead.
+        let mut ahead = Sim::new();
+        run_input(&mut ahead, &Env::CALM, &FULL_AHEAD, 8.0);
+        let ahead_speed = ahead.boat_vel().0.length();
+        let mut astern = Sim::new();
+        run_input(&mut astern, &Env::CALM, &FULL_ASTERN, 8.0);
+        let astern_speed = astern.boat_vel().0.length();
+        assert!(astern_speed > 0.5, "full astern barely moved the boat: {astern_speed} m/s");
+        assert!(
+            astern_speed < ahead_speed * 0.75,
+            "expected astern to be clearly weaker: astern {astern_speed} vs ahead {ahead_speed}"
+        );
+    }
+
+    #[test]
+    fn a_burst_astern_walks_the_stern_to_port() {
+        // Right-handed prop: going astern the walk force pushes the stern
+        // to port. At heading 0 (bow east, port = +y) that is a +y force at
+        // the stern => a clockwise (negative) yaw: the bow swings to
+        // starboard, the classic "backs to port".
+        let mut astern = Sim::new();
+        run_input(&mut astern, &Env::CALM, &FULL_ASTERN, 6.0);
+        let (_, h_astern) = astern.boat_pose();
+        assert!(
+            h_astern < -0.02,
+            "expected the bow to swing starboard (negative heading) going astern, got {h_astern}"
+        );
+
+        // Control: ahead the walk reverses sign and the wash keeps it weak
+        // — a smaller swing the other way.
+        let mut ahead = Sim::new();
+        run_input(&mut ahead, &Env::CALM, &FULL_AHEAD, 6.0);
+        let (_, h_ahead) = ahead.boat_pose();
+        assert!(
+            h_ahead > 0.0,
+            "expected a slight port swing (positive heading) going ahead, got {h_ahead}"
+        );
+        assert!(
+            h_astern.abs() > h_ahead.abs(),
+            "prop walk should bite harder astern: astern {h_astern} vs ahead {h_ahead}"
+        );
+    }
+
+    #[test]
+    fn engine_spools_rather_than_steps() {
+        // The delivered engine response chases the telegraph with a
+        // first-order lag (THROTTLE_TAU = 0.4 s): one time constant after
+        // slamming to full ahead it sits near 1 - 1/e ≈ 0.63, neither still
+        // at zero nor already at full.
+        let mut sim = Sim::new();
+        run_input(&mut sim, &Env::CALM, &FULL_AHEAD, 0.4);
+        let n = sim.engine();
+        assert!(
+            n > 0.55 && n < 0.72,
+            "expected the engine near 1-1/e one time constant in, got {n}"
         );
     }
 }
