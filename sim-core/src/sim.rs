@@ -183,6 +183,64 @@ const PROP_WALK_AHEAD: f32 = 0.06;
 const PROP_WALK_ASTERN: f32 = 0.13;
 
 // ---------------------------------------------------------------------------
+// Rudder
+// ---------------------------------------------------------------------------
+
+/// Rudder stock position (local x, m): on the transom, aft of the prop and
+/// squarely in its wash.
+const RUDDER_X: f32 = -5.9;
+/// Blade area (m²): ~1.35 m draught × 0.4 m chord — the same rudder the
+/// fin-keel preset paints as an area strip at this station (see keel.rs on
+/// how the two models split the work).
+const RUDDER_AREA: f32 = 0.54;
+/// Hard-over blade angle (degrees each way).
+const RUDDER_MAX_DEG: f32 = 35.0;
+/// Effective aspect ratio: the hull above the blade acts as an end plate,
+/// roughly doubling the geometric AR. Sets both the lift slope
+/// 2π·AR/(AR+2) ≈ 3.8/rad and the induced drag CL²/(π·AR).
+const RUDDER_AR: f32 = 3.0;
+/// The lift curve is linear up to STALL_ON (~17°) and pure flat-plate
+/// (0.9·sin 2α) beyond STALL_OFF (~25°), linearly blended between so the
+/// force has no step at the break (a step would limit-cycle a helm held
+/// right at stall).
+const RUDDER_STALL_ON: f32 = 0.30; // rad
+const RUDDER_STALL_OFF: f32 = 0.44; // rad
+/// Fraction of ahead thrust the deflected prop wash converts to side
+/// force at the rudder. Thrust-deflection form (F = K·T·sin δ) rather
+/// than a slipstream-velocity model: the added momentum flux in the wash
+/// IS the thrust, so this is bounded by construction where the velocity
+/// form needs an ad-hoc cap.
+const K_WASH: f32 = 0.85;
+
+/// Signed lift coefficient of the rudder foil vs angle of attack (rad,
+/// chord→flow). A foil overtaken by the flow (|α| > 90°: making sternway,
+/// or crash-stopping through its own wake) is still a foil with the other
+/// edge leading, so fold by ±π and serve all four quadrants from one
+/// curve — this single fold is what makes steering reverse correctly when
+/// backing, with zero special cases.
+fn rudder_cl(alpha: f32) -> f32 {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let mut a = alpha;
+    if a > FRAC_PI_2 {
+        a -= PI;
+    } else if a < -FRAC_PI_2 {
+        a += PI;
+    }
+    let mag = a.abs();
+    let linear = 2.0 * PI * RUDDER_AR / (RUDDER_AR + 2.0) * mag;
+    let plate = 0.9 * (2.0 * mag).sin();
+    let cl = if mag <= RUDDER_STALL_ON {
+        linear
+    } else if mag < RUDDER_STALL_OFF {
+        let t = (mag - RUDDER_STALL_ON) / (RUDDER_STALL_OFF - RUDDER_STALL_ON);
+        linear * (1.0 - t) + plate * t
+    } else {
+        plate
+    };
+    cl.copysign(a)
+}
+
+// ---------------------------------------------------------------------------
 // Environment
 // ---------------------------------------------------------------------------
 
@@ -523,6 +581,50 @@ impl Sim {
         let f_walk = side * walk;
         rb.add_force_at_point(vector![f_walk.x, f_walk.y], point![prop.x, prop.y], true);
 
+        // --- Rudder: a foil in the local flow at the stern. δ is the BLADE
+        // angle (positive = trailing edge to port => the boat turns to
+        // port), opposite the helm sign convention on `InputState::rudder`.
+        let delta = -input.rudder.clamp(-1.0, 1.0) * RUDDER_MAX_DEG.to_radians();
+        // The inflow the blade actually sees: the hull's water-relative
+        // surge/sway PLUS the yaw sweep w·x at the rudder's station. That
+        // yaw term is the rudder half of the keel coupling — the keel's
+        // damping moments set how fast yaw builds, and the built-up yaw in
+        // turn feeds the rudder's angle of attack (a boat with a spinning
+        // stern has its rudder self-damp the spin, which is why a fin
+        // keeler still tracks at all).
+        let flow = Vec2::new(-surge, -(sway + w * RUDDER_X));
+        let rud_pt = pos + fwd * RUDDER_X;
+        if flow.length_squared() > 1e-6 {
+            let fhat = flow / flow.length();
+            let chord = Vec2::new(-delta.cos(), delta.sin()); // stock → trailing edge
+            let alpha = chord.perp_dot(fhat).atan2(chord.dot(fhat));
+            let cl = rudder_cl(alpha);
+            // Lift + lift-INDUCED drag only. The blade's passive broadside
+            // drag is deliberately NOT here: the keel profile's lateral
+            // area already covers the rudder-at-rest as one of its strips
+            // (the fin preset paints it at this very station), so a
+            // parasitic sin²α term would double-count what the profile
+            // integrals already apply. The foil owns exactly the forces a
+            // drag-strip model cannot produce: circulation lift and the
+            // drag that lift induces.
+            let cd = 0.01 + cl * cl / (std::f32::consts::PI * RUDDER_AR);
+            let q = 0.5 * RHO_WATER * RUDDER_AREA * flow.length_squared();
+            let f_local = Vec2::new(-fhat.y, fhat.x) * (q * cl) + fhat * (q * cd);
+            let f_rudder = fwd * f_local.x + side * f_local.y;
+            rb.add_force_at_point(vector![f_rudder.x, f_rudder.y], point![rud_pt.x, rud_pt.y], true);
+        }
+        // Prop wash over the blade: motoring ahead the prop's slipstream
+        // hits the deflected rudder, which turns it sideways — the reaction
+        // is K_WASH·T·sin δ of side force at the stern, there the instant
+        // the throttle opens, boat speed zero or not. THE harbour
+        // manoeuvre: a burst of ahead power kicks the bow around before
+        // the boat gathers way. Astern (thrust < 0) the wash goes forward
+        // under the hull and misses the blade entirely — no steerage
+        // astern until sternway builds real flow, only prop walk. Both
+        // behaviours fall out of the single max(T, 0).
+        let f_wash = side * (-K_WASH * thrust.max(0.0) * delta.sin());
+        rb.add_force_at_point(vector![f_wash.x, f_wash.y], point![rud_pt.x, rud_pt.y], true);
+
         self.physics_pipeline.step(
             &self.gravity,
             &self.integration_params,
@@ -808,6 +910,110 @@ mod tests {
             h_astern.abs() > h_ahead.abs(),
             "prop walk should bite harder astern: astern {h_astern} vs ahead {h_ahead}"
         );
+    }
+
+    #[test]
+    fn rudder_turns_the_boat_when_making_way() {
+        // Helm to starboard (positive input) with way on => clockwise turn
+        // (negative heading at start orientation); mirrored to port. Short
+        // runs from an injected speed, engine off, so this isolates the
+        // foil from wash and walk.
+        let turn = |rudder: f32| {
+            let mut sim = Sim::new();
+            sim.set_forward_speed(2.5);
+            let input = InputState { throttle: 0.0, rudder };
+            run_input(&mut sim, &Env::CALM, &input, 1.5);
+            sim.boat_pose().1
+        };
+        let stbd = turn(1.0);
+        let port = turn(-1.0);
+        assert!(stbd < -0.03, "helm to starboard should turn clockwise, got heading {stbd}");
+        assert!(port > 0.03, "helm to port should turn anticlockwise, got heading {port}");
+    }
+
+    #[test]
+    fn prop_wash_steers_at_rest_ahead_but_not_astern() {
+        // From a dead stop, a burst of AHEAD power steers immediately: the
+        // prop wash hits the deflected blade before the boat has any way
+        // on. The same burst ASTERN gives (almost) no rudder authority —
+        // the wash misses the blade; only slowly-building sternway flow
+        // acts. Differential across both helm directions, so prop walk
+        // (identical for either helm) cancels and only rudder authority
+        // remains.
+        let turn = |throttle: f32, rudder: f32| {
+            let mut sim = Sim::new();
+            run_input(&mut sim, &Env::CALM, &InputState { throttle, rudder }, 2.0);
+            sim.boat_pose().1
+        };
+        let ahead_authority = turn(1.0, 1.0) - turn(1.0, -1.0);
+        let astern_authority = turn(-1.0, 1.0) - turn(-1.0, -1.0);
+        assert!(
+            ahead_authority < -0.05,
+            "starboard helm + ahead burst should swing the bow starboard, got diff {ahead_authority}"
+        );
+        assert!(
+            ahead_authority.abs() > 3.0 * astern_authority.abs(),
+            "rudder authority should be far greater ahead than astern: \
+             ahead {ahead_authority} vs astern {astern_authority}"
+        );
+    }
+
+    #[test]
+    fn hard_over_stalls() {
+        // The lift curve: linear below stall, flat-plate above, odd, and
+        // folded by π so a backing foil reads the same curve. CL at
+        // hard-over (35° => 0.611 rad) sits BELOW the pre-stall peak —
+        // more helm is not always more turn.
+        assert!(rudder_cl(0.28) > rudder_cl(0.611));
+        assert!((rudder_cl(-0.28) + rudder_cl(0.28)).abs() < 1e-6, "lift curve must be odd");
+        assert!(
+            (rudder_cl(0.28 - std::f32::consts::PI) - rudder_cl(0.28)).abs() < 1e-5,
+            "folding by pi must land on the same curve (backing foil)"
+        );
+
+        // And the behaviour it buys: the INITIAL helm bite. Slammed
+        // hard-over the blade starts stalled and bites more weakly than a
+        // moderate helm still on the linear slope. (Only the first instants
+        // show it: once yaw builds, the swinging stern rotates the inflow,
+        // eases the effective angle of attack back toward the slope, and
+        // the deeper geometric angle wins again — a soft-stalling low-AR
+        // rudder hard-over still out-turns moderate helm at steady state,
+        // it just gets there mushily and with far more induced drag.)
+        let initial_rate = |rudder: f32| {
+            let mut sim = Sim::new();
+            sim.set_forward_speed(3.0);
+            let input = InputState { throttle: 0.0, rudder };
+            for _ in 0..12 {
+                sim.tick(&Env::CALM, &input);
+            }
+            sim.boat_vel().1.abs()
+        };
+        let moderate = initial_rate(0.45);
+        let hard_over = initial_rate(1.0);
+        assert!(
+            moderate > hard_over,
+            "a stalled hard-over should bite more weakly at first: \
+             moderate {moderate} vs hard-over {hard_over} rad/s"
+        );
+    }
+
+    #[test]
+    fn backing_reverses_the_helm() {
+        // Making sternway the flow comes over the blade from astern, so
+        // the same helm yaws the boat the other way (and the stern, which
+        // now leads, seeks the helm side) — the fold in `rudder_cl` at
+        // work. Same injected speed magnitude both ways, engine off.
+        let heading_after = |u: f32| {
+            let mut sim = Sim::new();
+            sim.set_forward_speed(u);
+            let input = InputState { throttle: 0.0, rudder: 1.0 };
+            run_input(&mut sim, &Env::CALM, &input, 1.5);
+            sim.boat_pose().1
+        };
+        let ahead = heading_after(1.5);
+        let astern = heading_after(-1.5);
+        assert!(ahead < -0.01, "starboard helm with headway: clockwise, got {ahead}");
+        assert!(astern > 0.01, "starboard helm with sternway: anticlockwise, got {astern}");
     }
 
     #[test]

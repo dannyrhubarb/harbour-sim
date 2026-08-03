@@ -211,6 +211,31 @@ like Pegasus.
   |thrust|: `PROP_WALK_AHEAD` 0.06 (stern nudges starboard) vs
   `PROP_WALK_ASTERN` 0.13 (stern kicks port — "backs to port",
   `a_burst_astern_walks_the_stern_to_port`).
+- **Rudder** (constants in sim.rs, blade at `RUDDER_X` −5.9 m, 0.54 m²,
+  ±35°): a foil in the LOCAL water-relative flow at the stern — surge/sway
+  PLUS the yaw sweep `w·RUDDER_X`, which is the rudder half of the keel
+  coupling (the keel's moments set how fast yaw builds; built-up yaw feeds
+  the rudder's angle of attack and self-damps the spin). Lift curve
+  `rudder_cl`: linear slope 2π·AR/(AR+2) ≈ 3.8 to ~17°, blended to
+  flat-plate `0.9·sin 2α` past ~25° (no force step at stall), and FOLDED by
+  ±π — a foil overtaken by the flow is still a foil, which is the whole
+  backing-steering story with zero special cases
+  (`backing_reverses_the_helm`). Stall shows up as a mushier INITIAL bite
+  hard-over (`hard_over_stalls`) — at steady state the yaw feedback eases
+  the effective angle back toward the slope, so hard-over still out-turns
+  moderate helm, just draggier (that's real low-AR-rudder behaviour, don't
+  "fix" it). The foil contributes ONLY lift + induced drag (`CL²/(π·AR)`):
+  its passive broadside drag is already a strip of the keel profile (see
+  keel.rs module doc), so a parasitic `sin²α` term here would double-count
+  — and would break the symmetric-profile control in
+  `spinning_an_aft_biased_hull_shoves_it_to_starboard`. **Prop wash**:
+  thrust-deflection form `K_WASH·max(T,0)·sin δ` at the blade — steerage
+  from a standing start ahead (THE harbour move: burst of power kicks the
+  bow before the boat gathers way), nothing astern (the wash misses the
+  blade), both from the single `max(T,0)`
+  (`prop_wash_steers_at_rest_ahead_but_not_astern`). Chosen over a
+  slipstream-velocity model because the deflected momentum flux IS the
+  thrust — bounded by construction, no ad-hoc cap.
 - **Axial water drag is asymmetric fore/aft** like the windage below:
   `CD_WATER_BOW` 0.15 (fine entry) vs `CD_WATER_STERN` 0.35 (transom
   first), selected by the sign of the water-relative surge. The old single
@@ -352,10 +377,10 @@ like Pegasus.
   the first.
 - **Ropes**: placeable mooring lines (bow/stern/springs) — each a constraint
   or spring force between a hull fairlead and a quay bollard, applied inside
-  `tick` from a future `InputState`. Then: engine/rudder, scenarios
-  (approach, spring off a lee quay, …), recordings/replays (the Pegasus
-  hybrid format), scoring. (Touch controls are done — see Frontend
-  conventions above.)
+  `tick` from an extended `InputState`. Then: scenarios (approach, spring
+  off a lee quay, …), recordings/replays (the Pegasus hybrid format),
+  scoring. (Touch controls and engine/rudder are done — see Frontend
+  conventions and Simulation model above.)
 
 ## License
 GPL-3.0-or-later (deliberate choice, 2026-08-02, formalising the field the

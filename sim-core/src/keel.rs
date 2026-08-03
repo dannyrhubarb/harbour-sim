@@ -10,6 +10,15 @@
 //! CLR offset paired with a full keel's yaw damping). `KeelProfile` makes
 //! that curve the single source of truth: draw/edit it once (see the
 //! frontend's keel editor), derive both constants from it by integration.
+//!
+//! The profile is the FIXED underwater lateral area — keel, skeg, hull,
+//! and the rudder blade at rest (the fin preset paints the rudder as its
+//! aft strip). The MOVABLE rudder in `sim.rs` is a separate foil model
+//! that deliberately contributes only circulation lift and lift-induced
+//! drag — forces a passive drag-strip distribution cannot produce — so the
+//! two models split the physics instead of double-counting it: this
+//! profile owns all passive lateral/yaw drag, the foil owns everything
+//! that depends on blade deflection.
 
 use glam::Vec2;
 
