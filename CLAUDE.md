@@ -194,6 +194,14 @@ interpolation (`lerp` + shortest-path angle lerp) like Pegasus.
   property that will make replays possible.
 
 ## Frontend conventions (src/main.rs)
+- **Mobile-first UI**: design and test every UI feature for touch/phone
+  screens first. That doesn't exclude desktop — but the two UIs must stay
+  **on par feature-wise**: anything reachable with a keyboard/mouse needs a
+  touch equivalent and vice versa (the KEEL button existing because K has
+  no touch equivalent is the canonical example). If a richer,
+  more detailed desktop UI ever seems warranted, that divergence must be
+  discussed and agreed by the maintainers first — don't let the two drift
+  apart in ordinary feature work.
 - **Units (verified against the vendored macroquad 0.4.15 source)**:
   `screen_width()/screen_height()` and `mouse_position()` are LOGICAL css px
   (physical / dpi); `touches()` returns RAW PHYSICAL px and every touch
