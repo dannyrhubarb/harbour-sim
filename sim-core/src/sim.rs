@@ -205,6 +205,77 @@ fn wetted_surface_area(profile: &KeelProfile) -> f32 {
     wsa + 2.0 * RUDDER_CHORD * RUDDER_DEPTH
 }
 
+// ---------------------------------------------------------------------------
+// Axial (surge) hull resistance: wave-making (approximate — see below)
+// ---------------------------------------------------------------------------
+//
+// Fixing the ITTC friction model above correctly exposed that the sim had
+// NO wave-making resistance term at all: full-throttle equilibrium came out
+// to ~9.4 kn, above this hull's classic displacement hull speed (~8.4 kn,
+// Fn=0.4) — not achievable on 28 hp in reality. The old bluff-body
+// coefficient was accidentally capping top speed at a plausible number
+// while ALSO being wrong at low speed; fixing one exposed the other.
+//
+// The RIGHT tool for this is hull-form-specific: the Delft Systematic Yacht
+// Hull Series (DSYHS, Gerritsma/Onnink/Versluis 1981, refined since by
+// Keuning et al.) — tank-tested residuary-resistance regressions against 22
+// systematically varied yacht hull forms, the standard used by real yacht
+// VPPs. NOT implemented here: it needs a coefficient table I could not
+// verify from available sources (tried four; none surfaced the real
+// numbers), and hull-form inputs this sim doesn't model yet (prismatic
+// coefficient, LCB, midship coefficient, BWL/Tc) — reciting a plausible-
+// looking but unverified table would be exactly the kind of invented
+// number this whole rewrite has been trying to get away from.
+//
+// What IS implemented is the right FUNCTION CLASS, generically calibrated
+// rather than hull-form-fitted:
+//
+//   Cw(Fn) = C_WAVE_SCALE · exp(-C_WAVE_K / Fn²)
+//
+// This is the classical thin-ship (Michell/Havelock) asymptotic result for
+// wave resistance at low-to-moderate Froude number: an essential
+// singularity that vanishes faster than any power of Fn as Fn -> 0, then
+// rises steeply approaching the hull-speed hump — the theoretically correct
+// SHAPE, independent of hull form (DSYHS would sharpen the AMPLITUDE for
+// THIS hull, not change this underlying shape).
+//
+// The two constants are fit to two widely-cited, GENERIC (not hull-form-
+// specific, not tuned to this boat's own target behaviour) anchor points:
+//   - Rw/Δ ~ 0.001 (negligible) at Fn = 0.20 — well below where wave-making
+//     is understood to matter for any displacement hull.
+//   - Rw/Δ ~ 0.12 (dominant) at Fn = 0.42 (~hull speed) — the commonly
+//     cited order-of-magnitude "hump" value for a moderate displacement
+//     hull's residuary resistance near hull speed.
+// Consistency check, not a target: solving these two constants and
+// re-running the equilibrium lands full-throttle at 6.3 kn — close to the
+// ~6.2 kn this sim's engine sizing (T_BOLLARD_AHEAD's comment) always
+// assumed, without that number being an input anywhere in this derivation.
+// The low-speed coasting distance (the benchmark the ITTC fix targeted) is
+// unaffected: Cw is negligible at 1-3 kn (Fn ~0.05-0.15), as it should be.
+//
+// TODO(upgrade path): replace Cw(Fn) with the real DSYHS regression once
+// its coefficient table can be sourced and verified, and derive its hull-
+// form inputs from `HULL_PTS`/`KeelProfile` the same way
+// `wetted_surface_area` derives from them now — would sharpen the
+// AMPLITUDE for this specific hull without changing the function class.
+const C_WAVE_SCALE: f32 = 0.489;
+const C_WAVE_K: f32 = 0.248;
+/// Standard gravity (m/s²) — NOT the same thing as `Sim`'s Rapier `gravity`
+/// (deliberately zero, this is a top-down sim with no vertical dynamics).
+/// This is the real-world constant Froude number and hull-speed weight
+/// (`mass · G_EARTH`) are defined against.
+const G_EARTH: f32 = 9.81;
+
+/// Wave-making resistance coefficient vs. Froude number — see the module
+/// comment above for the derivation. `Fn <= 0` (dead stop) correctly gives
+/// 0: no relative speed, no waves.
+fn wave_resistance_coefficient(froude: f32) -> f32 {
+    if froude <= 0.0 {
+        return 0.0;
+    }
+    C_WAVE_SCALE * (-C_WAVE_K / (froude * froude)).exp()
+}
+
 // Sway and yaw keep a linear low-speed term (surge no longer has one — see
 // below) because their quadratic terms are keel-profile-derived
 // (`self.keel.area`, `self.keel.cubic_moment`), so a flat linear floor
@@ -244,22 +315,12 @@ pub const START_HEADING: f32 = 0.0;
 
 // A ~28 hp auxiliary diesel (≈21 kW shaft) with a fixed 3-blade prop, at the
 // ~0.2 kN-per-kW bollard-pull rule of thumb. Equilibrium against the ITTC
-// surge drag above, at the default profile: full ahead ≈ 4.85 m/s (9.4 kn),
-// half throttle ≈ 2.4 m/s, full astern ≈ 4.4 m/s.
-//
-// GOTCHA (2026-08-03, flagged not patched): 9.4 kn is above this hull's
-// classic displacement hull speed (1.34·√LWL_ft ≈ 8.4 kn) — not physically
-// achievable on 28 hp, because nothing in `tick` yet models wave-making
-// resistance, which is what actually caps a displacement hull near there
-// (negligible at the low Froude numbers the ITTC fix targeted, ~0.07-0.14
-// at 1-3 kn, but very much NOT negligible approaching Fn≈0.4, ~8 kn for
-// this LWL). Fixing the low-speed friction model correctly is exactly what
-// EXPOSED this — the old bluff-body coefficient was accidentally capping
-// top speed at a plausible-looking number while also being wrong at low
-// speed. The honest fix is a wave-making term (real, Froude-number-shaped,
-// same standard as the friction fix), not re-inflating the friction
-// coefficient to paper over a different, unmodeled effect — left open
-// rather than patched.
+// friction + wave-making surge drag above, at the default profile: full
+// ahead ≈ 3.25 m/s (6.3 kn), half throttle ≈ 2.24 m/s (4.4 kn) — a boat
+// that motors below hull speed (~8.4 kn, Fn=0.4), as auxiliaries do. (Before
+// the wave-making term existed, this equilibrium came out to 9.4 kn — above
+// hull speed, not physically achievable on 28 hp; see the wave-resistance
+// block comment above for that story.)
 const T_BOLLARD_AHEAD: f32 = 4200.0; // N
 // A prop pitched for ahead delivers much less astern.
 const ASTERN_RATIO: f32 = 0.6;
@@ -729,7 +790,15 @@ impl Sim {
         // vanishes, not the coefficient.
         let re = surge.abs() * self.hull_length / NU_WATER;
         let cf = ittc57_cf(re) * HULL_FORM_FACTOR;
-        let f_surge = -fwd * (0.5 * RHO_WATER * cf * self.wetted_surface * surge * surge.abs());
+        let f_friction = 0.5 * RHO_WATER * cf * self.wetted_surface * surge * surge.abs();
+        // Wave-making resistance — see the block comment above
+        // `wave_resistance_coefficient` for the derivation (approximate,
+        // generically calibrated, not hull-form-fitted; negligible here at
+        // 1-3 kn, Fn~0.05-0.15, so this doesn't disturb the friction fix's
+        // own benchmark).
+        let froude = surge.abs() / (G_EARTH * self.hull_length).sqrt();
+        let f_wave = rb.mass() * G_EARTH * wave_resistance_coefficient(froude) * surge.signum();
+        let f_surge = -fwd * (f_friction + f_wave);
         let f_sway = -side
             * (0.5 * RHO_WATER * CD_WATER_LAT * self.keel.area * sway * sway.abs()
                 + k_lin_sway(self.keel.area) * sway);
@@ -1112,30 +1181,53 @@ mod tests {
 
     #[test]
     fn full_throttle_equilibrium_speed_is_bracketed() {
-        // The thrust curve intersects the ITTC surge drag somewhere around
-        // 4.85 m/s at the default profile (see the gotcha on
-        // T_BOLLARD_AHEAD — this is now above the classic hull-speed limit,
-        // a known open gap pending a wave-making resistance term, not
-        // something to paper over here). The basin is too small for a long
-        // straight run to settle there, so bracket instead: released below
-        // the equilibrium the boat must still be gaining, released above it
-        // it must be losing.
+        // The thrust curve intersects the ITTC friction + wave-making surge
+        // drag somewhere around 3.25 m/s (6.3 kn) at the default profile —
+        // back near this hull's intended ~6.2 kn ahead speed (see
+        // T_BOLLARD_AHEAD's comment) now that wave-making resistance caps
+        // it below hull speed again, without that number being tuned to hit
+        // this test. The basin is too small for a long straight run to
+        // settle there, so bracket instead: released below the equilibrium
+        // the boat must still be gaining, released above it it must be
+        // losing.
         let below = {
             let mut sim = Sim::new();
-            sim.set_forward_speed(4.0);
+            sim.set_forward_speed(2.5);
             run_input(&mut sim, &Env::CALM, &FULL_AHEAD, 3.0);
             let (v, _) = sim.boat_vel();
             v.length()
         };
-        assert!(below > 4.0, "expected to accelerate from 4.0 m/s at full ahead, got {below}");
+        assert!(below > 2.5, "expected to accelerate from 2.5 m/s at full ahead, got {below}");
         let above = {
             let mut sim = Sim::new();
-            sim.set_forward_speed(5.5);
+            sim.set_forward_speed(3.8);
             run_input(&mut sim, &Env::CALM, &FULL_AHEAD, 3.0);
             let (v, _) = sim.boat_vel();
             v.length()
         };
-        assert!(above < 5.5, "expected to slow from 5.5 m/s at full ahead, got {above}");
+        assert!(above < 3.8, "expected to slow from 3.8 m/s at full ahead, got {above}");
+    }
+
+    #[test]
+    fn wave_resistance_is_negligible_at_low_speed_and_dominant_near_hull_speed() {
+        // Low end: at the Froude numbers the ITTC friction fix targeted
+        // (~1-3 kn for this hull, Fn~0.05-0.15), wave-making must stay
+        // negligible so it doesn't disturb that fix's own benchmark.
+        let low = wave_resistance_coefficient(0.15);
+        assert!(low < 0.001, "wave resistance should be negligible at Fn=0.15, got Cw={low}");
+        // High end: approaching hull speed (Fn~0.4), wave-making should
+        // have become a substantial fraction of displacement weight — the
+        // "wall" that caps a normally-powered displacement hull there.
+        let high = wave_resistance_coefficient(0.42);
+        assert!(high > 0.05, "wave resistance should be substantial near hull speed, got Cw={high}");
+        // Monotonically increasing across that whole range — no spurious
+        // hump or dip from the exponential's own shape.
+        let samples: Vec<f32> =
+            (10..=45).map(|i| wave_resistance_coefficient(i as f32 / 100.0)).collect();
+        assert!(
+            samples.windows(2).all(|w| w[1] >= w[0]),
+            "Cw(Fn) should be monotonically increasing: {samples:?}"
+        );
     }
 
     #[test]
