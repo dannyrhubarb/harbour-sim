@@ -193,9 +193,24 @@ const PROP_WALK_ASTERN: f32 = 0.13;
 pub const RUDDER_X: f32 = -5.9;
 /// Blade chord (m), public for the same reason as `RUDDER_X`: the keel
 /// editor draws the blade's footprint from these directly.
-pub const RUDDER_CHORD: f32 = 0.4;
-/// Blade depth (m) below the hull's own baseline draught.
-pub const RUDDER_DEPTH: f32 = 1.35;
+///
+/// 2026-08-03: was 0.4 m × 1.35 m (0.54 m², geometric AR 3.375) — picked
+/// without checking against a real boat. Cross-checked two ways: the
+/// O'Day 39 (one of the reference boats already used for this hull's own
+/// dimensions) has an actual spade rudder ~5 ft (1.52 m) deep, chord
+/// tapering 28 in (0.71 m) at the head to 20 in (0.51 m) at the tip,
+/// average ≈0.61 m — area ≈0.93 m². Independently, the lateral-plane rule
+/// of thumb (rudder ≈10% of total underwater lateral plane, hull+keel+
+/// rudder) against this hull's own `KeelDerived.area` (~8.5 m² at the
+/// default profile) solves to ≈0.95 m². Both land in the same place — the
+/// old 0.54 m² was undersized by roughly half. Rectangular blade here
+/// (this sim has no chord taper), sized to the O'Day's real depth and
+/// average chord rather than re-deriving from the percentage rule, since
+/// it also fixes `RUDDER_AR` below at the same time.
+pub const RUDDER_CHORD: f32 = 0.61;
+/// Blade depth (m) below the hull's own baseline draught. See
+/// `RUDDER_CHORD`'s comment — from the O'Day 39 reference (5 ft = 1.52 m).
+pub const RUDDER_DEPTH: f32 = 1.52;
 /// Blade area (m²) — `RUDDER_CHORD * RUDDER_DEPTH`, computed rather than
 /// duplicated so the editor's drawing and the physics can never disagree
 /// about the blade's size.
@@ -204,8 +219,17 @@ const RUDDER_AREA: f32 = RUDDER_CHORD * RUDDER_DEPTH;
 const RUDDER_MAX_DEG: f32 = 35.0;
 /// Effective aspect ratio: the hull above the blade acts as an end plate,
 /// roughly doubling the geometric AR. Sets both the lift slope
-/// 2π·AR/(AR+2) ≈ 3.8/rad and the induced drag CL²/(π·AR).
-const RUDDER_AR: f32 = 3.0;
+/// 2π·AR/(AR+2) and the induced drag CL²/(π·AR).
+///
+/// 2026-08-03: was a bare 3.0, independently of `RUDDER_CHORD`/
+/// `RUDDER_DEPTH` — inconsistent with itself (those dimensions' own
+/// geometric AR, depth/chord, was 3.375, not the ~1.5 this constant's own
+/// comment implied before doubling). Now DERIVED from the same real
+/// dimensions above instead of asserted separately: the O'Day 39
+/// reference's geometric AR is 1.52/0.61 ≈ 2.49, doubled for the endplate
+/// effect ≈5.0 — a single source of truth for the blade's shape, not two
+/// numbers that can silently drift apart.
+const RUDDER_AR: f32 = 2.0 * (RUDDER_DEPTH / RUDDER_CHORD);
 /// The lift curve is linear (attached flow) up to STALL_ON (~17°) and
 /// follows the Hoerner flat-plate law beyond STALL_OFF (~25°), linearly
 /// blended between so neither force has a step at the break (a step would

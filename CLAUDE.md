@@ -219,16 +219,38 @@ like Pegasus.
   `PROP_WALK_ASTERN` 0.13 (stern kicks port — "backs to port",
   `a_burst_astern_walks_the_stern_to_port`).
 - **Rudder** (constants in sim.rs, blade at `RUDDER_X` −5.9 m,
-  `RUDDER_CHORD` 0.4 m × `RUDDER_DEPTH` 1.35 m = 0.54 m², ±35°, all `pub`
+  `RUDDER_CHORD` 0.61 m × `RUDDER_DEPTH` 1.52 m = 0.93 m², ±35°, all `pub`
   so the keel editor can draw the blade at its true size/position): a
   foil in the LOCAL water-relative flow at the stern — surge/sway PLUS the
   yaw sweep `w·RUDDER_X`, which is the rudder half of the keel coupling
   (the keel's moments set how fast yaw builds; built-up yaw feeds the
-  rudder's angle of attack). `rudder_lift_drag` (2026-08-03 rewrite,
-  replacing the old `rudder_cl`): linear thin-airfoil slope
-  2π·AR/(AR+2) ≈ 3.8/rad to ~17° (unchanged — this regime was never the
-  problem) blended into Hoerner's flat-plate normal-force law
-  (`CD_FLAT_PLATE` ≈ 1.98, a literature constant, not fitted — the
+  rudder's angle of attack).
+  **Blade dimensions (2026-08-03, second pass) — sized from a real boat,
+  not picked to "look right"**: the original 0.4 m × 1.35 m (0.54 m²) was
+  undersized by roughly half against two independent checks — the O'Day
+  39's actual spade rudder (one of the reference boats already used for
+  this hull's own dimensions: ~5 ft/1.52 m deep, chord tapering 28 in/
+  0.71 m at the head to 20 in/0.51 m at the tip, average ≈0.61 m, area
+  ≈0.93 m²) and the lateral-plane rule of thumb (rudder ≈10% of total
+  underwater lateral plane, which against this hull's own
+  `KeelDerived.area` solves to ≈0.95 m²). `RUDDER_AR` is now DERIVED as
+  `2·(RUDDER_DEPTH/RUDDER_CHORD)` instead of asserted as a bare `3.0`
+  independently of the blade's own dimensions — the old value implied a
+  geometric AR of ~1.5 before doubling, but the blade's own literal
+  dimensions gave 3.375, an inconsistency that went unnoticed until sized
+  against a real reference; deriving it structurally means the two numbers
+  can't drift apart again. Net effect: lift slope rose from ≈3.77/rad to
+  ≈4.48/rad (AR 3.0 → 4.98) on top of the ~72% bigger area — measured
+  against the pure-rudder backing-turn benchmark from earlier testing (2.5
+  kn sternway, engine neutral, full rudder), 90° of turn now arrives at
+  ~13 m of travel, vs. never getting near 90° at all with the old blade —
+  much closer to the ~90°/8m real-world mooring-class benchmark that
+  motivated this whole rudder investigation.
+  `rudder_lift_drag` (2026-08-03 rewrite, replacing the old `rudder_cl`):
+  linear thin-airfoil slope 2π·AR/(AR+2) to ~17° (unchanged in FORM — this
+  regime was never the problem) blended into Hoerner's flat-plate
+  normal-force law (`CD_FLAT_PLATE` ≈ 1.98, a literature constant, not
+  fitted — the
   Viterna–Corrigan technique used to extend wind-turbine blade sections
   past stall) past ~25°, resolved into lift/drag by the chord-to-flow
   angle, folded by ±π so a foil overtaken by the flow (backing) is still a
