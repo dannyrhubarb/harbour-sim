@@ -42,7 +42,14 @@ sharing two composite actions (`.github/actions/build-site` = wasm build +
 icons + revision injection; `.github/actions/sync-pages-branch` = commit into
 `gh-pages` with a push-retry loop for concurrent deploys):
 - `deploy.yml` (**Main deploy**, push to `main`): build → sync branch root
-  (live `pr-*/` previews are kept).
+  (live `pr-*/` previews are kept). **Deploys the main TIP at run time,
+  not the pushed sha** (gotcha, seen live 2026-08-03): push runs can start
+  out of order — the run for an older commit sat queued ~11 min, started
+  21 s after the newer commit's run, cancelled it via
+  `cancel-in-progress`, and synced the OLD build over the site root (the
+  About-page merge vanished from the live site). Checking out
+  `origin/main` at run start makes straggler runs redeploy current
+  content instead, so run ordering can't regress the site.
 - `preview-deploy.yml` (**Preview deploy**, PR opened/synchronize/reopened):
   build (revision label `<head-sha>-pr-<n>`) → sync `pr-<n>/` → sticky PR
   comment (`<!-- preview-env -->` marker) with the preview URL. Skipped for
