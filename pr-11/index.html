@@ -63,6 +63,7 @@
       bottom: calc(10px + env(safe-area-inset-bottom, 0px));
       width: 30px;
       height: 30px;
+      padding: 0; /* native button reset */
       border: 2px solid var(--dim);
       border-radius: 50%;
       background: rgba(10, 20, 30, 0.67);
@@ -101,11 +102,15 @@
     .about-value { font-size: 14px; word-break: break-all; }
     .about-card a { color: #7fd4ff; }
     #about-close {
+      display: block;
+      width: 100%;
       margin-top: 18px;
       padding: 8px 0;
       text-align: center;
       border: 1px solid var(--dim);
       border-radius: 6px;
+      background: none; /* native button reset */
+      font: 14px var(--mono);
       color: var(--text);
       cursor: pointer;
       -webkit-user-select: none;
@@ -171,10 +176,10 @@
   <!-- About overlay (the Pegasus scr-about, sized to this repo): build
        revision linked to its commit, build time, and — on a pr-<n>/
        preview deployment — a link to the PR it previews. -->
-  <div id="about-btn" title="About">i</div>
+  <button type="button" id="about-btn" title="About" aria-label="About">i</button>
   <div id="about">
-    <div class="about-card">
-      <h2>HARBOUR SIM</h2>
+    <div class="about-card" role="dialog" aria-modal="true" aria-labelledby="about-title">
+      <h2 id="about-title">HARBOUR SIM</h2>
       <div class="about-row">
         <div class="about-label">Build revision</div>
         <div class="about-value" id="about-rev">dev (local build)</div>
@@ -191,7 +196,7 @@
         <div class="about-label">Project</div>
         <div class="about-value"><a href="https://github.com/harbour-sim/harbour-sim" target="_blank" rel="noopener">harbour-sim on GitHub</a></div>
       </div>
-      <div id="about-close">Close</div>
+      <button type="button" id="about-close">Close</button>
     </div>
   </div>
 
@@ -199,7 +204,7 @@
   <script>
     // Deploy-time injected revision (build-site sed). Local dev keeps the
     // placeholder — then no cache-buster is appended.
-    const wasmRev = "a97465e-pr-11";
+    const wasmRev = "503d2d4-pr-11";
     if (!wasmRev.startsWith("__")) {
       document.getElementById("rev-line").textContent = "build " + wasmRev;
     }
@@ -368,14 +373,14 @@
     }
 
     // --- About overlay ---------------------------------------------------
-    // Build info from the deploy-time seds (build-site): a97465e-pr-11
+    // Build info from the deploy-time seds (build-site): 503d2d4-pr-11
     // (already in wasmRev above) is `<short-sha>` on main and
-    // `<short-sha>-pr-<n>` on a preview deploy; 2026-08-03T11:27:05Z is ISO-8601
+    // `<short-sha>-pr-<n>` on a preview deploy; 2026-08-03T11:34:19Z is ISO-8601
     // UTC, re-rendered via fmtDateTime above. Local dev keeps both
     // placeholders and shows the "dev (local build)" defaults.
     (function () {
       const repoUrl = "https://github.com/harbour-sim/harbour-sim";
-      const buildTime = "2026-08-03T11:27:05Z";
+      const buildTime = "2026-08-03T11:34:19Z";
       const aboutEl = document.getElementById("about");
       const revEl = document.getElementById("about-rev");
       const link = (href, label) => {
@@ -414,19 +419,31 @@
           link(repoUrl + "/pull/" + prNum, "PR #" + prNum));
         document.getElementById("about-pr-row").style.display = "";
       }
+      // Dialog focus management: open focuses the Close button, close
+      // restores focus to the ⓘ button. Note the game's keyboard input
+      // needs CANVAS focus either way (miniquad wires onkeydown to the
+      // canvas element) — that's the page-load state too, so restoring to
+      // the button follows the dialog convention without regressing keys.
       const btn = document.getElementById("about-btn");
-      btn.addEventListener("click", () => {
+      const closeBtn = document.getElementById("about-close");
+      function openAbout() {
         renderBuildTime();
         aboutEl.classList.add("on");
-      });
-      document.getElementById("about-close").addEventListener("click",
-        () => aboutEl.classList.remove("on"));
+        closeBtn.focus();
+      }
+      function closeAbout() {
+        if (!aboutEl.classList.contains("on")) return;
+        aboutEl.classList.remove("on");
+        btn.focus();
+      }
+      btn.addEventListener("click", openAbout);
+      closeBtn.addEventListener("click", closeAbout);
       // Tap the dimmed backdrop (not the card) to dismiss; Esc too.
       aboutEl.addEventListener("click", (e) => {
-        if (e.target === aboutEl) aboutEl.classList.remove("on");
+        if (e.target === aboutEl) closeAbout();
       });
       window.addEventListener("keydown", (e) => {
-        if (e.key === "Escape") aboutEl.classList.remove("on");
+        if (e.key === "Escape") closeAbout();
       });
       // Swallow press events so a tap on the button/overlay can never
       // double as a canvas press (the Pegasus menu rule) — stopPropagation
