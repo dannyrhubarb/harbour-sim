@@ -93,8 +93,8 @@ icons + revision injection; `.github/actions/sync-pages-branch` = commit into
     curve by integration, see Simulation model below).
 - `src/main.rs` — macroquad frontend: input, fixed-timestep loop with render
   interpolation, top-down rendering (water/ripples, quay, breakwaters, boat),
-  HUD (wind/current indicators, SOG readout, key help), keel design editor
-  overlay (`K`).
+  HUD (wind/current dials, throttle/rudder sliders, SOG readout, key help),
+  keel design editor overlay (`E`).
 - `src/keel_editor.rs` — in-app editor for `KeelProfile`: drag a fixed-grid
   bar chart to paint the underwater area distribution, two presets (fin/long
   keel), live-derived readout, Apply respawns the boat via
@@ -303,7 +303,7 @@ like Pegasus.
 - **Mobile-first UI**: design and test every UI feature for touch/phone
   screens first. That doesn't exclude desktop — but the two UIs must stay
   **on par feature-wise**: anything reachable with a keyboard/mouse needs a
-  touch equivalent and vice versa (the KEEL button existing because K has
+  touch equivalent and vice versa (the KEEL button existing because E has
   no touch equivalent is the canonical example). If a richer,
   more detailed desktop UI ever seems warranted, that divergence must be
   discussed and agreed by the maintainers first — don't let the two drift
@@ -324,14 +324,23 @@ like Pegasus.
   (`Dial` struct) — drag direction from the dial centre = the flow's TOWARD
   direction (wind label still displays the mariners' FROM convention:
   from = to + 180°), drag distance = speed (rim = `WIND_MAX`/`CURRENT_MAX`,
-  centre dead-zone = calm). A RESET button (bottom-right) twins the R key.
-  Mouse drives the same dials via press/drag. `simulate_mouse_with_touch
-  (false)` at startup so touches don't double as mouse presses. **Touch
-  claims are by id-not-seen-last-frame, NOT `TouchPhase::Started`** —
-  touchstart collapses into the following touchmove whenever touch events
-  outpace the frame loop (the hard-won Pegasus phase-collapse lesson; a
-  `Started` phase on an already-claimed id means a recycled id = new
-  finger, so the claim is dropped and re-evaluated).
+  centre dead-zone = calm). The helm/engine are **sliders** (`Slider`
+  struct) on the mid-left (throttle, vertical, up = ahead) and mid-right
+  (rudder, horizontal, right = starboard helm) edges — the two-thumb zone;
+  both HOLD where left (a real single-lever control / helm with friction —
+  agreed in review, no spring-return) with a 10% centre detent and the
+  dials' 1/20 quantisation, centred at `0.56·sh` to clear the dials+labels
+  above and the buttons below down to ~360 px min-dim. A RESET button
+  (bottom-right) twins the R key. Mouse drives the same controls via
+  press/drag (`mouse_claim` discriminants: 0 wind, 1 current, 2 throttle,
+  3 rudder). `simulate_mouse_with_touch(false)` at startup so touches
+  don't double as mouse presses. **Touch claims are by
+  id-not-seen-last-frame, NOT `TouchPhase::Started`** — touchstart
+  collapses into the following touchmove whenever touch events outpace
+  the frame loop (the hard-won Pegasus phase-collapse lesson; a `Started`
+  phase on an already-claimed id means a recycled id = new finger, so the
+  claim is dropped and re-evaluated). One `Option<u64>` claim per control
+  is what makes simultaneous two-thumb throttle+rudder work.
 - **Safe-area insets**: `index.html` resolves `env(safe-area-inset-*)` via a
   hidden probe element (+ folds the floating-toolbar height in via
   `visualViewport`) and pushes css px into the wasm export
@@ -347,16 +356,23 @@ like Pegasus.
   `innerHeight` shrinks with the visible area, so the difference reads 0.
 - Cosmetic-only nondeterminism is allowed render-side (the water ripples use
   `get_time()`); nothing cosmetic may feed back into the sim.
-- Controls: touch/mouse = drag the dials + RESET/KEEL buttons; keyboard =
-  ←/→ wind dir, ↑/↓ wind speed, A/D current dir, W/S current speed, R reset
-  (reset = `respawn(&keel_profile)`, a fresh `Sim::new_with_keel`, never an
-  in-place teleport; env is kept), K keel design editor (freezes physics —
-  all input and the physics tick, not just rendering — while open; see
-  `src/keel_editor.rs`). The KEEL button exists because K has no touch
-  equivalent otherwise — without it there'd be no way to reach the editor
-  on a touch-only device. Once open, the editor itself takes touch input
-  too (`KeelEditor::update`'s own `touches()` handling, independent of the
-  HUD's — mirrors the same fresh-touch-id pattern as the dials, since
+- Controls: touch/mouse = drag the dials/sliders + RESET/KEEL buttons;
+  keyboard = **the boat has the primary keys** (agreed 2026-08-03: driving
+  is the main activity): W/S throttle up/down, A/D helm port/starboard
+  (continuous `is_key_down`×dt like the env keys), Space = engine to
+  neutral (edge-triggered). Wind keeps ←/→ dir + ↑/↓ speed; current sits
+  on the IJKL "second arrows" cluster (J/L dir, I/K speed) — which is why
+  the keel editor moved from K to **E** (K = current speed down now). R
+  reset (reset = `respawn(&keel_profile)`, a fresh `Sim::new_with_keel`,
+  never an in-place teleport; env is kept but **helm/engine reset to
+  `InputState::NEUTRAL`** — a fresh boat doesn't inherit a live
+  telegraph), E keel design editor (freezes physics — all input and the
+  physics tick, not just rendering — while open; see `src/keel_editor.rs`).
+  The KEEL button exists because E has no touch equivalent otherwise —
+  without it there'd be no way to reach the editor on a touch-only device.
+  Once open, the editor itself takes touch input too (`KeelEditor::update`'s
+  own `touches()` handling, independent of the HUD's — mirrors the same
+  fresh-touch-id pattern as the dials, since
   `simulate_mouse_with_touch(false)` means touches never synthesize a
   mouse press).
 

@@ -1,10 +1,13 @@
 # Harbour Sim
 
-A harbour mooring simulator: a boat lying alongside a quay, pushed around by
-wind and current. The plan is to grow this into a game about mooring
-manoeuvres — placing ropes (springs, breast lines, bow/stern lines) to make
-the boat move the way you want under different conditions. Right now it's a
-proof of concept: fixed quay, adjustable wind and current, no ropes yet.
+A harbour mooring simulator: a small sailboat under auxiliary engine in a
+harbour basin, with wind and current to fight. Engine and rudder are fully
+modeled — prop walk, prop wash over the rudder, rudder stall and all — so
+real close-quarters technique works: back and fill, kick the bow round with
+a burst of ahead power, feel the stern walk to port going astern. The plan
+is to grow this into a game about mooring manoeuvres — placing ropes
+(springs, breast lines, bow/stern lines) to make the boat move the way you
+want under different conditions. No ropes yet.
 
 **▶ Play it at <https://harbour-sim.github.io/harbour-sim/>**
 
@@ -14,21 +17,27 @@ Pages.
 
 ## Controls
 
-**Touch / mouse**: drag the two compass dials (top corners) — direction of
-the drag sets where the wind/current flows toward, distance from the centre
-sets the speed (centre = calm). The RESET button returns the boat to its
-mooring.
+**Touch / mouse**: the vertical slider on the left edge is the engine
+telegraph (up = ahead, down = astern, centre = neutral); the horizontal
+slider on the right edge is the helm (right = starboard). Both hold where
+you leave them, with a centre detent — drive with two thumbs. Drag the two
+compass dials (top corners) to set wind and current — drag direction is
+where the flow goes toward, distance is speed (centre = calm). The RESET
+button returns the boat to its mooring, engine to neutral, helm amidships.
 
 **Keyboard**:
 
 | Keys | Effect |
 |------|--------|
+| W / S | Throttle up / down (ahead ↔ astern) |
+| A / D | Helm to port / starboard |
+| Space | Engine to neutral |
 | ← / → | Rotate wind direction |
 | ↑ / ↓ | Wind speed |
-| A / D | Rotate current direction |
-| W / S | Current speed |
+| J / L | Rotate current direction |
+| I / K | Current speed |
 | R | Reset the boat to its mooring |
-| K | Keel design editor |
+| E | Keel design editor |
 
 ## Build & run
 

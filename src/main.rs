@@ -39,6 +39,11 @@ const CURRENT_RATE: f32 = 0.4; // m/s
 const WIND_MAX: f32 = 25.0;
 const CURRENT_MAX: f32 = 2.5;
 
+// Helm/engine key rates (full-scale units per second of key held):
+// hard-over in ~1.1 s, idle to full throttle in ~1.4 s.
+const RUDDER_KEY_RATE: f32 = 0.9;
+const THROTTLE_KEY_RATE: f32 = 0.7;
+
 // --- Safe-area insets (css px), pushed from index.html on the web build.
 // Native builds never call the export and stay at 0.
 static SAFE_T: AtomicU32 = AtomicU32::new(0);
@@ -120,6 +125,38 @@ impl Dial {
     }
 }
 
+/// A draggable linear slider (screen-space css px) holding a -1..=1 value:
+/// the throttle (vertical, up = ahead) and the rudder (horizontal, right =
+/// starboard helm). Like a real single-lever control or a helm with
+/// friction it HOLDS where it's left — no spring-return — with a centre
+/// detent so neutral/amidships is easy to hit by feel.
+#[derive(Clone, Copy)]
+struct Slider {
+    rect: Rect,
+    vertical: bool,
+}
+
+impl Slider {
+    fn hit(&self, p: Vec2) -> bool {
+        // Generous pad, same reason as Dial::hit.
+        let pad = 12.0;
+        p.x >= self.rect.x - pad
+            && p.x <= self.rect.x + self.rect.w + pad
+            && p.y >= self.rect.y - pad
+            && p.y <= self.rect.y + self.rect.h + pad
+    }
+
+    fn value(&self, p: Vec2) -> f32 {
+        let raw = if self.vertical {
+            (self.rect.y + self.rect.h * 0.5 - p.y) / (self.rect.h * 0.5)
+        } else {
+            (p.x - self.rect.x - self.rect.w * 0.5) / (self.rect.w * 0.5)
+        };
+        let v = if raw.abs() < 0.10 { 0.0 } else { raw.clamp(-1.0, 1.0) };
+        (v * 20.0).round() / 20.0 // same 1/20 quantisation as the dials
+    }
+}
+
 #[macroquad::main(window_conf)]
 async fn main() {
     // Touches are handled natively below; without this a touch would also
@@ -135,19 +172,26 @@ async fn main() {
         current_to_deg: 90.0,
         current_speed: 0.4,
     };
+    // Helm + engine, the other half of the input stream. Unlike `env` this
+    // resets to neutral with the boat (see the do_reset block).
+    let mut input = InputState::NEUTRAL;
 
     let mut accum = 0.0f32;
     let (mut prev_pos, mut prev_heading) = sim.boat_pose();
     let (mut cur_pos, mut cur_heading) = (prev_pos, prev_heading);
 
-    // Touch/mouse claims for the two dials. "Fresh touch" detection is by
-    // id-not-seen-last-frame, NOT by TouchPhase::Started — touchstart
-    // collapses into the following touchmove whenever events outpace the
-    // frame loop (the hard-won Pegasus lesson in docs/touch-input.md).
+    // Touch/mouse claims for the two dials + two sliders. "Fresh touch"
+    // detection is by id-not-seen-last-frame, NOT by TouchPhase::Started —
+    // touchstart collapses into the following touchmove whenever events
+    // outpace the frame loop (the hard-won Pegasus lesson in
+    // docs/touch-input.md). Per-control claims are what make the two-thumb
+    // grip work: one finger on the throttle, one on the rudder, at once.
     let mut prev_touch_ids: Vec<u64> = Vec::new();
     let mut wind_claim: Option<u64> = None;
     let mut current_claim: Option<u64> = None;
-    let mut mouse_claim: Option<u8> = None; // 0 = wind, 1 = current
+    let mut throttle_claim: Option<u64> = None;
+    let mut rudder_claim: Option<u64> = None;
+    let mut mouse_claim: Option<u8> = None; // 0 = wind, 1 = current, 2 = throttle, 3 = rudder
 
     loop {
         let dt = get_frame_time().min(0.05);
@@ -157,7 +201,9 @@ async fn main() {
         let (sa_t, sa_l, sa_b, sa_r) = safe_area();
         let min_dim = sw.min(sh);
 
-        if is_key_pressed(KeyCode::K) {
+        // E = Editor. (Was K until the boat took WASD and the current took
+        // IJKL — K is now current-speed-down.)
+        if is_key_pressed(KeyCode::E) {
             if !editor.active {
                 editor.load(&keel_profile);
             }
@@ -199,6 +245,20 @@ async fn main() {
             keel_w,
             keel_h,
         );
+        // Helm/engine sliders on the mid-left/mid-right edges — the
+        // two-thumb zone on a phone, clear of the dials above (centre at
+        // 0.56·sh keeps the throttle's top under the wind dial's label
+        // down to ~360 px min-dim) and the buttons below.
+        let sl_w = (min_dim * 0.085).clamp(26.0, 40.0);
+        let sl_len = (min_dim * 0.42).clamp(130.0, 230.0);
+        let throttle_slider = Slider {
+            rect: Rect::new(sa_l + margin, sh * 0.56 - sl_len * 0.5, sl_w, sl_len),
+            vertical: true,
+        };
+        let rudder_slider = Slider {
+            rect: Rect::new(sw - sa_r - margin - sl_len, sh * 0.56 - sl_w * 0.5, sl_len, sl_w),
+            vertical: false,
+        };
 
         if !editor.active {
             let mut do_reset = is_key_pressed(KeyCode::R);
@@ -218,10 +278,20 @@ async fn main() {
                     if current_claim == Some(t.id) {
                         current_claim = None;
                     }
+                    if throttle_claim == Some(t.id) {
+                        throttle_claim = None;
+                    }
+                    if rudder_claim == Some(t.id) {
+                        rudder_claim = None;
+                    }
                     if wind_dial.hit(p) && wind_claim.is_none() {
                         wind_claim = Some(t.id);
                     } else if current_dial.hit(p) && current_claim.is_none() {
                         current_claim = Some(t.id);
+                    } else if throttle_slider.hit(p) && throttle_claim.is_none() {
+                        throttle_claim = Some(t.id);
+                    } else if rudder_slider.hit(p) && rudder_claim.is_none() {
+                        rudder_claim = Some(t.id);
                     } else if reset_rect.contains(p) {
                         do_reset = true;
                     } else if keel_rect.contains(p) {
@@ -236,6 +306,10 @@ async fn main() {
                     let (to, frac) = current_dial.value(p);
                     env.current_to_deg = to;
                     env.current_speed = frac * CURRENT_MAX;
+                } else if throttle_claim == Some(t.id) {
+                    input.throttle = throttle_slider.value(p);
+                } else if rudder_claim == Some(t.id) {
+                    input.rudder = rudder_slider.value(p);
                 }
             }
             if wind_claim.is_some_and(|id| !cur_ids.contains(&id)) {
@@ -243,6 +317,12 @@ async fn main() {
             }
             if current_claim.is_some_and(|id| !cur_ids.contains(&id)) {
                 current_claim = None;
+            }
+            if throttle_claim.is_some_and(|id| !cur_ids.contains(&id)) {
+                throttle_claim = None;
+            }
+            if rudder_claim.is_some_and(|id| !cur_ids.contains(&id)) {
+                rudder_claim = None;
             }
             prev_touch_ids = cur_ids;
 
@@ -253,6 +333,10 @@ async fn main() {
                     mouse_claim = Some(0);
                 } else if current_dial.hit(mp) {
                     mouse_claim = Some(1);
+                } else if throttle_slider.hit(mp) {
+                    mouse_claim = Some(2);
+                } else if rudder_slider.hit(mp) {
+                    mouse_claim = Some(3);
                 } else if reset_rect.contains(mp) {
                     do_reset = true;
                 } else if keel_rect.contains(mp) {
@@ -271,6 +355,8 @@ async fn main() {
                         env.current_to_deg = to;
                         env.current_speed = frac * CURRENT_MAX;
                     }
+                    Some(2) => input.throttle = throttle_slider.value(mp),
+                    Some(3) => input.rudder = rudder_slider.value(mp),
                     _ => {}
                 }
             } else {
@@ -278,6 +364,26 @@ async fn main() {
             }
 
             // --- Keyboard input ---------------------------------------------
+            // The boat has the primary keys — driving it is the main
+            // activity: W/S throttle, A/D helm, Space cuts the engine to
+            // neutral. Wind keeps the arrows; the current sits on IJKL,
+            // the "second arrows" cluster, with the same spatial meaning
+            // (I/K speed up/down, J/L rotate direction).
+            if is_key_down(KeyCode::W) {
+                input.throttle = (input.throttle + THROTTLE_KEY_RATE * dt).min(1.0);
+            }
+            if is_key_down(KeyCode::S) {
+                input.throttle = (input.throttle - THROTTLE_KEY_RATE * dt).max(-1.0);
+            }
+            if is_key_down(KeyCode::A) {
+                input.rudder = (input.rudder - RUDDER_KEY_RATE * dt).max(-1.0);
+            }
+            if is_key_down(KeyCode::D) {
+                input.rudder = (input.rudder + RUDDER_KEY_RATE * dt).min(1.0);
+            }
+            if is_key_pressed(KeyCode::Space) {
+                input.throttle = 0.0;
+            }
             if is_key_down(KeyCode::Left) {
                 env.wind_from_deg -= DIR_RATE * dt;
             }
@@ -290,16 +396,16 @@ async fn main() {
             if is_key_down(KeyCode::Down) {
                 env.wind_speed = (env.wind_speed - WIND_RATE * dt).max(0.0);
             }
-            if is_key_down(KeyCode::A) {
+            if is_key_down(KeyCode::J) {
                 env.current_to_deg -= DIR_RATE * dt;
             }
-            if is_key_down(KeyCode::D) {
+            if is_key_down(KeyCode::L) {
                 env.current_to_deg += DIR_RATE * dt;
             }
-            if is_key_down(KeyCode::W) {
+            if is_key_down(KeyCode::I) {
                 env.current_speed = (env.current_speed + CURRENT_RATE * dt).min(CURRENT_MAX);
             }
-            if is_key_down(KeyCode::S) {
+            if is_key_down(KeyCode::K) {
                 env.current_speed = (env.current_speed - CURRENT_RATE * dt).max(0.0);
             }
             env.wind_from_deg = env.wind_from_deg.rem_euclid(360.0);
@@ -309,6 +415,9 @@ async fn main() {
                 // Fresh Sim per run — never reuse one (determinism rule).
                 (sim, prev_pos, prev_heading, cur_pos, cur_heading) = respawn(&keel_profile);
                 accum = 0.0;
+                // Helm and engine come back neutral with the fresh boat;
+                // the environment deliberately persists (same as always).
+                input = InputState::NEUTRAL;
             }
             if do_open_editor {
                 editor.load(&keel_profile);
@@ -320,7 +429,7 @@ async fn main() {
             while accum >= PHYSICS_DT {
                 prev_pos = cur_pos;
                 prev_heading = cur_heading;
-                sim.tick(&env, &InputState::NEUTRAL);
+                sim.tick(&env, &input);
                 (cur_pos, cur_heading) = sim.boat_pose();
                 accum -= PHYSICS_DT;
             }
@@ -547,6 +656,87 @@ async fn main() {
             &format!("CURR {:.1} m/s to {:03.0}", env.current_speed, env.current_to_deg),
         );
 
+        let eng_col = Color::from_rgba(255, 185, 80, 255);
+        let rud_col = Color::from_rgba(200, 160, 255, 255);
+
+        // A slider: translucent track, centre-detent tick, filled bar from
+        // the centre to the value, knob line, bright outline while grabbed.
+        let draw_slider = |sl: &Slider, val: f32, col: Color, grabbed: bool| {
+            let r = sl.rect;
+            draw_rectangle(r.x, r.y, r.w, r.h, Color::from_rgba(10, 20, 30, 150));
+            draw_rectangle_lines(
+                r.x,
+                r.y,
+                r.w,
+                r.h,
+                if grabbed { 2.5 } else { 1.5 },
+                if grabbed { col } else { dim },
+            );
+            let fill = Color::new(col.r, col.g, col.b, 0.35);
+            if sl.vertical {
+                let cy = r.y + r.h * 0.5;
+                draw_line(r.x, cy, r.x + r.w, cy, 1.5, dim);
+                let ky = cy - val * r.h * 0.5;
+                if val.abs() > 1e-3 {
+                    draw_rectangle(r.x + r.w * 0.2, ky.min(cy), r.w * 0.6, (cy - ky).abs(), fill);
+                }
+                draw_line(r.x, ky, r.x + r.w, ky, 3.0, col);
+            } else {
+                let cx = r.x + r.w * 0.5;
+                draw_line(cx, r.y, cx, r.y + r.h, 1.5, dim);
+                let kx = cx + val * r.w * 0.5;
+                if val.abs() > 1e-3 {
+                    draw_rectangle(kx.min(cx), r.y + r.h * 0.2, (kx - cx).abs(), r.h * 0.6, fill);
+                }
+                draw_line(kx, r.y, kx, r.y + r.h, 3.0, col);
+            }
+        };
+
+        // Throttle: F(orward) / R(everse) end marks beside the track, and
+        // an engine readout under it. The readout shows the TELEGRAPH
+        // (what's commanded); the spooled response is what the boat does.
+        let tr = throttle_slider.rect;
+        draw_slider(
+            &throttle_slider,
+            input.throttle,
+            eng_col,
+            throttle_claim.is_some() || mouse_claim == Some(2),
+        );
+        draw_text("F", tr.x + tr.w + 4.0, tr.y + fs * 0.8, fs * 0.7, dim);
+        draw_text("R", tr.x + tr.w + 4.0, tr.y + tr.h - fs * 0.15, fs * 0.7, dim);
+        let eng_label = if input.throttle > 0.0 {
+            format!("ENG {:.0}% AHD", input.throttle * 100.0)
+        } else if input.throttle < 0.0 {
+            format!("ENG {:.0}% AST", -input.throttle * 100.0)
+        } else {
+            "ENG NEUTRAL".to_owned()
+        };
+        draw_text(&eng_label, tr.x, tr.y + tr.h + fs * 1.1, fs * 0.8, eng_col);
+
+        // Rudder: helm angle readout under the track's centre.
+        let rr = rudder_slider.rect;
+        draw_slider(
+            &rudder_slider,
+            input.rudder,
+            rud_col,
+            rudder_claim.is_some() || mouse_claim == Some(3),
+        );
+        let rud_label = if input.rudder > 0.0 {
+            format!("RUD {:.0} STBD", input.rudder * 35.0)
+        } else if input.rudder < 0.0 {
+            format!("RUD {:.0} PORT", -input.rudder * 35.0)
+        } else {
+            "RUD AMIDSHIPS".to_owned()
+        };
+        let rd = measure_text(&rud_label, None, (fs * 0.8) as u16, 1.0);
+        draw_text(
+            &rud_label,
+            (rr.x + (rr.w - rd.width) * 0.5).clamp(4.0, sw - rd.width - 4.0),
+            rr.y + rr.h + fs * 1.1,
+            fs * 0.8,
+            rud_col,
+        );
+
         // Boat speed-over-ground and speed-through-water, centred between
         // the dials. STW is SOG relative to the current, not the wind —
         // the reading a paddlewheel/pitot log would give.
@@ -599,9 +789,10 @@ async fn main() {
         // which owns the bottom-left corner itself (30 px + gaps; the
         // indent is harmless dead space in native builds, which have no
         // HTML layer).
-        let mut help: Vec<&str> = vec!["drag the dials to set wind & current, tap KEEL to design"];
+        let mut help: Vec<&str> = vec!["left slider = engine, right = rudder; dials set wind & current"];
         if sw >= 700.0 {
-            help.push("keys: arrows = wind, A/D+W/S = current, R = reset, K = keel editor");
+            help.push("keys: W/S throttle, A/D rudder, Space stop engine, arrows wind");
+            help.push("I/K+J/L = current, R = reset, E = keel editor");
         }
         let help_x = sa_l + margin + 40.0;
         // On narrow screens the hint line runs under the KEEL/RESET buttons
