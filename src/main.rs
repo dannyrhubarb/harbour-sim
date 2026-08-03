@@ -594,18 +594,22 @@ async fn main() {
 
         // Hints, bottom-left. Keyboard lines only where a keyboard is
         // likely (wide screens); ASCII only — the built-in font has no
-        // arrow glyphs.
+        // arrow glyphs. Indented past the HTML About button (index.html),
+        // which owns the bottom-left corner itself (30 px + gaps; the
+        // indent is harmless dead space in native builds, which have no
+        // HTML layer).
         let mut help: Vec<&str> = vec!["drag the dials to set wind & current, tap KEEL to design"];
         if sw >= 700.0 {
             help.push("keys: arrows = wind, A/D+W/S = current, R = reset, K = keel editor");
         }
+        let help_x = sa_l + margin + 40.0;
         // On narrow screens the hint line runs under the KEEL/RESET buttons
         // (they share the bottom edge) — lift the block above them then.
         let help_w = help
             .iter()
             .map(|l| measure_text(l, None, (fs * 0.8) as u16, 1.0).width)
             .fold(0.0, f32::max);
-        let help_base = if sa_l + margin + help_w > keel_rect.x - margin {
+        let help_base = if help_x + help_w > keel_rect.x - margin {
             keel_rect.y - margin
         } else {
             sh - sa_b - margin
@@ -613,7 +617,7 @@ async fn main() {
         for (i, line) in help.iter().enumerate() {
             draw_text(
                 line,
-                sa_l + margin,
+                help_x,
                 help_base - (help.len() - 1 - i) as f32 * fs,
                 fs * 0.8,
                 dim,
