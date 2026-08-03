@@ -23,6 +23,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Deploy the branch TIP as of run time, not the pushed sha. Push runs
+      # can start out of order (seen live 2026-08-03: the run for an older
+      # commit was queued ~11 min late, started 21 s after — and, via
+      # cancel-in-progress, cancelled — the newer commit's run, then synced
+      # the older build over the site root). With the tip checked out, any
+      # straggler run redeploys current content, so run ordering can't
+      # regress the site; the revision label below follows HEAD and stays
+      # truthful.
+      - name: Check out the current main tip
+        run: |
+          git fetch origin main
+          git checkout --detach origin/main
+
       - name: Resolve revision
         id: rev
         run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
