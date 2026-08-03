@@ -195,7 +195,7 @@
   <script>
     // Deploy-time injected revision (build-site sed). Local dev keeps the
     // placeholder — then no cache-buster is appended.
-    const wasmRev = "987e46c-pr-11";
+    const wasmRev = "20b5d03-pr-11";
     if (!wasmRev.startsWith("__")) {
       document.getElementById("rev-line").textContent = "build " + wasmRev;
     }
@@ -301,15 +301,77 @@
     });
     window.addEventListener("blur", releaseAllMouseButtons);
 
+    // --- Timestamp formatting (ported from Pegasus fmtDateTime) ----------
+    // Formatted for the region derived from the device TIMEZONE — the one
+    // regional setting browsers actually expose. Language tags lie about
+    // region: a phone set to English in Sweden reports a bare en-US
+    // (verified in the field on Pegasus), but its Intl.DateTimeFormat()
+    // .resolvedOptions().timeZone is still Europe/Stockholm. Intl only
+    // maps region -> zones (Intl.Locale getTimeZones), so reverse-map by
+    // scanning the 676 candidate region codes for the one whose zone list
+    // contains ours (~200 ms: deferred off the boot path and memoized in
+    // localStorage). Formatting then follows the REGION'S OWN conventions
+    // — its dominant language via maximize() (und-SE -> sv-Latn-SE ->
+    // "2026-07-11 16:00"), NOT the UI language glued onto the region
+    // (en-SE inserts a comma that is not the standard Swedish format).
+    // These timestamps are purely numeric, so no words from that language
+    // ever surface; -u-nu-latn pins Latin digits for regions whose default
+    // numerals aren't. Regionless zones (UTC, Etc/*), missing APIs (old
+    // Safari), or a not-yet-finished scan fall back to a fixed ISO local
+    // format.
+    let DATE_LOCALE = null;
+    (function initDateLocale() {
+      let zone = "";
+      try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { return; }
+      if (!zone) return;
+      try {
+        const c = JSON.parse(localStorage.getItem("harbour_sim_date_locale") || "null");
+        // v2: region-dominant-language formatting (the Pegasus cache shape)
+        if (c && c.v === 2 && c.zone === zone) { DATE_LOCALE = c.locale; return; }
+      } catch (e) { /* recompute below */ }
+      setTimeout(() => {
+        let locale = null;
+        for (let i = 0; i < 26 && !locale; i++) {
+          for (let j = 0; j < 26; j++) {
+            const region = String.fromCharCode(65 + i) + String.fromCharCode(65 + j);
+            let zones;
+            try {
+              const l = new Intl.Locale("und-" + region);
+              zones = l.getTimeZones ? l.getTimeZones() : l.timeZones;
+            } catch (e) { continue; }
+            if (zones && zones.includes(zone)) {
+              try { locale = new Intl.Locale("und-" + region).maximize().toString() + "-u-nu-latn"; }
+              catch (e) { locale = "en-" + region; }
+              break;
+            }
+          }
+        }
+        DATE_LOCALE = locale;
+        try {
+          localStorage.setItem("harbour_sim_date_locale", JSON.stringify({ v: 2, zone, locale }));
+        } catch (e) { /* quota — recompute next load */ }
+      }, 0);
+    })();
+    function fmtDateTime(ts) {
+      const d = new Date(ts);
+      if (DATE_LOCALE) {
+        try { return d.toLocaleString(DATE_LOCALE, { dateStyle: "short", timeStyle: "short" }); }
+        catch (e) { /* engine rejects the constructed tag — fall through */ }
+      }
+      const p = n => String(n).padStart(2, "0");
+      return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate())
+        + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+    }
+
     // --- About overlay ---------------------------------------------------
-    // Build info from the deploy-time seds (build-site): 987e46c-pr-11
+    // Build info from the deploy-time seds (build-site): 20b5d03-pr-11
     // (already in wasmRev above) is `<short-sha>` on main and
-    // `<short-sha>-pr-<n>` on a preview deploy; 2026-08-03T10:32:38Z is ISO-8601
-    // UTC, re-rendered in the viewer's locale. Local dev keeps both
+    // `<short-sha>-pr-<n>` on a preview deploy; 2026-08-03T11:03:18Z is ISO-8601
+    // UTC, re-rendered via fmtDateTime above. Local dev keeps both
     // placeholders and shows the "dev (local build)" defaults.
     (function () {
       const repoUrl = "https://github.com/harbour-sim/harbour-sim";
-      const buildTime = "2026-08-03T10:32:38Z";
+      const buildTime = "2026-08-03T11:03:18Z";
       const aboutEl = document.getElementById("about");
       const revEl = document.getElementById("about-rev");
       const link = (href, label) => {
@@ -330,10 +392,14 @@
           revEl.textContent = wasmRev;
         }
       }
-      if (!buildTime.startsWith("__")) {
-        const d = new Date(buildTime);
+      // Rendered on every OPEN, not at boot (the Pegasus renderBuildTime
+      // pattern): the region scan above is deferred and may not have
+      // finished by the time the page loads.
+      function renderBuildTime() {
+        if (buildTime.startsWith("__")) return; // local dev — keep the dash
+        const t = Date.parse(buildTime);
         document.getElementById("about-time").textContent =
-          isNaN(d.getTime()) ? buildTime : d.toLocaleString();
+          isNaN(t) ? buildTime : fmtDateTime(t);
       }
       // PR number: primarily the revision's -pr-<n> suffix; the pr-<n>/
       // path is the fallback (e.g. if the label format ever changes).
@@ -345,7 +411,10 @@
         document.getElementById("about-pr-row").style.display = "";
       }
       const btn = document.getElementById("about-btn");
-      btn.addEventListener("click", () => aboutEl.classList.add("on"));
+      btn.addEventListener("click", () => {
+        renderBuildTime();
+        aboutEl.classList.add("on");
+      });
       document.getElementById("about-close").addEventListener("click",
         () => aboutEl.classList.remove("on"));
       // Tap the dimmed backdrop (not the card) to dismiss; Esc too.
