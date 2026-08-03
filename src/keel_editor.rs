@@ -8,7 +8,7 @@
 //! outside a full respawn, keeping the "fresh Sim per run" determinism rule.
 
 use harbour_sim_core::keel::KeelProfile;
-use harbour_sim_core::sim::yaw_damping_coefficient;
+use harbour_sim_core::sim::{yaw_damping_coefficient, RUDDER_CHORD, RUDDER_DEPTH, RUDDER_X};
 use macroquad::prelude::*;
 
 /// Fixed control-point x positions (hull-local metres, bow positive),
@@ -280,6 +280,47 @@ impl KeelEditor {
             }
             prev = Some(p);
         }
+        // The rudder: no longer part of the paintable curve (it's a
+        // separate movable foil in `sim.rs` now, see its doc comment for
+        // why folding it into this profile double-counted it), but drawn
+        // here as a fixed reference so its size/position stay visible —
+        // "we know exactly where it is" (`RUDDER_X`/`RUDDER_CHORD`/
+        // `RUDDER_DEPTH`, the SAME constants the physics uses, not a
+        // separate guess). Drawn stacked BELOW whatever the hull/keel
+        // curve is at that station, rather than from the baseline, so it
+        // reads as an appendage hanging off the hull instead of
+        // overlapping/blending into the editable area.
+        let rudder_hull_depth = self.profile().sample(RUDDER_X);
+        let rudder_x0 = x_to_px(RUDDER_X - RUDDER_CHORD / 2.0);
+        let rudder_x1 = x_to_px(RUDDER_X + RUDDER_CHORD / 2.0);
+        let rudder_top_v = rudder_hull_depth.min(MAX_AREA_PER_LEN);
+        let rudder_bottom_v = (rudder_hull_depth + RUDDER_DEPTH).min(MAX_AREA_PER_LEN);
+        let rudder_top = canvas.y + (rudder_top_v / MAX_AREA_PER_LEN) * canvas.h;
+        let rudder_bottom = canvas.y + (rudder_bottom_v / MAX_AREA_PER_LEN) * canvas.h;
+        let rudder_col = Color::from_rgba(230, 120, 80, 200);
+        draw_rectangle(
+            rudder_x0,
+            rudder_top,
+            rudder_x1 - rudder_x0,
+            rudder_bottom - rudder_top,
+            Color::from_rgba(230, 120, 80, 90),
+        );
+        draw_rectangle_lines(
+            rudder_x0,
+            rudder_top,
+            rudder_x1 - rudder_x0,
+            rudder_bottom - rudder_top,
+            1.5,
+            rudder_col,
+        );
+        draw_text(
+            "rudder (fixed, not paintable)",
+            rudder_x1 + 4.0 * ui,
+            (rudder_top + rudder_bottom) * 0.5,
+            fs * 0.55,
+            rudder_col,
+        );
+
         // Centre of lateral resistance marker.
         let clr_t = ((derived.clr_offset + 6.0) / 12.0).clamp(0.0, 1.0);
         let clr_x = canvas.x + canvas.w * clr_t;

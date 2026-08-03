@@ -11,14 +11,19 @@
 //! that curve the single source of truth: draw/edit it once (see the
 //! frontend's keel editor), derive both constants from it by integration.
 //!
-//! The profile is the FIXED underwater lateral area — keel, skeg, hull,
-//! and the rudder blade at rest (the fin preset paints the rudder as its
-//! aft strip). The MOVABLE rudder in `sim.rs` is a separate foil model
-//! that deliberately contributes only circulation lift and lift-induced
-//! drag — forces a passive drag-strip distribution cannot produce — so the
-//! two models split the physics instead of double-counting it: this
-//! profile owns all passive lateral/yaw drag, the foil owns everything
-//! that depends on blade deflection.
+//! The profile is the FIXED underwater lateral area only — hull and keel
+//! (and any fixed skeg). It does NOT include the rudder: that's `sim.rs`'s
+//! job entirely now (`rudder_lift_drag`), because the rudder's
+//! contribution to yaw damping isn't fixed — it depends on the blade's
+//! live deflection angle, which this static, integrate-once-at-construction
+//! profile has no way to know. Painting the rudder in here as an
+//! always-on area strip used to charge a boat the FULL passive drag of a
+//! centered blade even while hard over and actively turning — exactly
+//! backwards, since a deflected blade is generating turning force, not
+//! resisting it. Removing it from the profile and giving the foil model a
+//! proper past-stall force law (see `rudder_lift_drag`) makes both the
+//! steering push and the centered-blade spin resistance fall out of the
+//! same live-angle calculation instead of fighting a stale duplicate.
 
 use glam::Vec2;
 
@@ -117,31 +122,21 @@ impl KeelProfile {
     }
 
     /// Fin/spade keel: lateral area concentrated in a short, deep patch
-    /// near amidships, plus a small runner (a skeg ahead of the rudder) —
-    /// real fin keels still carry a bit of area right aft for directional
-    /// control, they're not literally zero back there. The rest of the
-    /// hull isn't zero either: a thin baseline of wetted lateral area runs
-    /// the full length (every hull has *some* draught, even without a deep
-    /// keel) — the fin and runner are bumps on top of that, not the only
-    /// area that exists. Small lever arm, weak yaw damping overall — spins
-    /// much more freely than a long keel, but not perfectly rudderless.
+    /// near amidships. The rest of the hull isn't zero either: a thin
+    /// baseline of wetted lateral area runs the full length (every hull
+    /// has *some* draught, even without a deep keel) — the fin is a bump
+    /// on top of that, not the only area that exists. Small lever arm,
+    /// weak yaw damping overall — spins much more freely than a long keel.
+    /// Does NOT include the rudder (see the module doc comment) — that's
+    /// modeled entirely as a separate movable foil in `sim.rs`, which is
+    /// also why this preset's yaw damping is now noticeably lower than it
+    /// used to be: the old version double-counted the rudder as a fixed
+    /// area strip on top of what the foil model already provides.
     pub fn fin_keel() -> KeelProfile {
         const BASELINE: f32 = 0.15;
-        // For a thin blade, area-per-length is approximately its depth
-        // below the hull. BASELINE is already the hull's own draught, so
-        // "sticks 1.2 m below the hull" means the rudder's total profile
-        // depth is BASELINE + 1.2, not 1.2 outright — otherwise the rudder
-        // would be ~1.05 m below the hull's bottom, not 1.2. ~0.4 m fore-aft.
-        const RUDDER_PROTRUSION: f32 = 1.2;
-        const RUDDER_DEPTH: f32 = BASELINE + RUDDER_PROTRUSION;
-        const RUDDER_CHORD: f32 = 0.4;
-        let rudder_end = -6.0 + RUDDER_CHORD;
         KeelProfile {
             points: vec![
-                Vec2::new(-6.0, RUDDER_DEPTH), // the rudder, right at the stern
-                Vec2::new(rudder_end, RUDDER_DEPTH),
-                Vec2::new(rudder_end + 0.1, BASELINE), // quick taper back to baseline
-                Vec2::new(-4.2, BASELINE),
+                Vec2::new(-6.0, BASELINE),
                 Vec2::new(-1.0, BASELINE),
                 Vec2::new(-0.5, 3.6), // the fin
                 Vec2::new(0.5, 3.6),
@@ -251,15 +246,11 @@ mod tests {
         // pivot. Compare cubic moment PER UNIT AREA — the presets don't
         // have similar total areas, so an absolute comparison could pass
         // for the wrong reason (fin just has less area overall, not less
-        // per unit of it). The margin is looser than a naive "fin should
-        // spin way more freely" intuition suggests: fin_keel() also has a
-        // rudder right at the hull's extreme tip, and even a small area
-        // there is an efficient lever arm, so it isn't free — it just
-        // doesn't dominate the way a full keel's spread-out area does.
+        // per unit of it).
         let fin_per_area = fin.cubic_moment / fin.area;
         let long_per_area = long.cubic_moment / long.area;
         assert!(
-            fin_per_area < long_per_area * 0.75,
+            fin_per_area < long_per_area * 0.5,
             "fin cubic_moment/area {} should be below long's {}",
             fin_per_area,
             long_per_area

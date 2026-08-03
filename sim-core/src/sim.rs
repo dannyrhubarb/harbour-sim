@@ -187,24 +187,37 @@ const PROP_WALK_ASTERN: f32 = 0.13;
 // ---------------------------------------------------------------------------
 
 /// Rudder stock position (local x, m): on the transom, aft of the prop and
-/// squarely in its wash.
-const RUDDER_X: f32 = -5.9;
-/// Blade area (m²): ~1.35 m draught × 0.4 m chord — the same rudder the
-/// fin-keel preset paints as an area strip at this station (see keel.rs on
-/// how the two models split the work).
-const RUDDER_AREA: f32 = 0.54;
+/// squarely in its wash. Public so the keel editor can draw the blade at
+/// its real position — the profile no longer paints it (see `keel.rs`),
+/// so this is now the only source of truth for where it sits.
+pub const RUDDER_X: f32 = -5.9;
+/// Blade chord (m), public for the same reason as `RUDDER_X`: the keel
+/// editor draws the blade's footprint from these directly.
+pub const RUDDER_CHORD: f32 = 0.4;
+/// Blade depth (m) below the hull's own baseline draught.
+pub const RUDDER_DEPTH: f32 = 1.35;
+/// Blade area (m²) — `RUDDER_CHORD * RUDDER_DEPTH`, computed rather than
+/// duplicated so the editor's drawing and the physics can never disagree
+/// about the blade's size.
+const RUDDER_AREA: f32 = RUDDER_CHORD * RUDDER_DEPTH;
 /// Hard-over blade angle (degrees each way).
 const RUDDER_MAX_DEG: f32 = 35.0;
 /// Effective aspect ratio: the hull above the blade acts as an end plate,
 /// roughly doubling the geometric AR. Sets both the lift slope
 /// 2π·AR/(AR+2) ≈ 3.8/rad and the induced drag CL²/(π·AR).
 const RUDDER_AR: f32 = 3.0;
-/// The lift curve is linear up to STALL_ON (~17°) and pure flat-plate
-/// (0.9·sin 2α) beyond STALL_OFF (~25°), linearly blended between so the
-/// force has no step at the break (a step would limit-cycle a helm held
-/// right at stall).
+/// The lift curve is linear (attached flow) up to STALL_ON (~17°) and
+/// follows the Hoerner flat-plate law beyond STALL_OFF (~25°), linearly
+/// blended between so neither force has a step at the break (a step would
+/// limit-cycle a helm held right at stall).
 const RUDDER_STALL_ON: f32 = 0.30; // rad
 const RUDDER_STALL_OFF: f32 = 0.44; // rad
+/// Measured drag coefficient of a flat plate held broadside to a flow
+/// (Hoerner, *Fluid-Dynamic Drag*) — a literature constant, not fitted.
+/// Used to extrapolate the rudder foil past stall (see
+/// `rudder_lift_drag`), the same technique used to extend wind-turbine
+/// blade sections past stall (Viterna–Corrigan).
+const CD_FLAT_PLATE: f32 = 1.98;
 /// Fraction of ahead thrust the deflected prop wash converts to side
 /// force at the rudder. Thrust-deflection form (F = K·T·sin δ) rather
 /// than a slipstream-velocity model: the added momentum flux in the wash
@@ -212,14 +225,38 @@ const RUDDER_STALL_OFF: f32 = 0.44; // rad
 /// form needs an ad-hoc cap.
 const K_WASH: f32 = 0.85;
 
-/// Signed lift coefficient of the rudder foil vs angle of attack (rad,
-/// chord→flow). A foil overtaken by the flow (|α| > 90°: making sternway,
-/// or crash-stopping through its own wake) is still a foil with the other
-/// edge leading, so fold by ±π and serve all four quadrants from one
-/// curve — this single fold is what makes steering reverse correctly when
-/// backing, with zero special cases.
-fn rudder_cl(alpha: f32) -> f32 {
+/// Lift and drag coefficients of the rudder foil vs angle of attack
+/// between its chord and the LOCAL EFFECTIVE water direction (rad) — the
+/// caller measures α against the actual flow (surge, sway, *and* the
+/// yaw-sweep at the blade's station), not just the helm angle, so the
+/// same law naturally covers both a deflected blade steering a turn and a
+/// centered blade resisting one (see the call site in `tick`).
+///
+/// Below stall: textbook thin-airfoil theory — lift slope
+/// `2π·AR/(AR+2)` (the standard finite-span correction to the ideal 2π)
+/// with induced drag `cl²/(π·AR)`. Unchanged from before; this regime was
+/// never the problem.
+///
+/// Above stall, this used to fall back to a lift-only curve
+/// (`0.9·sin 2α`) with induced-drag-only `cd` — which collapses toward
+/// ZERO at α=90°, exactly the case that matters most (a centered blade
+/// swept broadside by the hull's own spin). That's backwards: a stalled
+/// foil is approximately a flat plate, and a flat plate's force is
+/// LARGEST at 90°, not smallest. Hoerner's flat-plate law gives the force
+/// normal to the CHORD (not the flow) as `CD_FLAT_PLATE·sin(mag)`, then
+/// resolves it into lift/drag by the chord-to-flow angle — at mag=90°
+/// that's zero lift, maximum drag: the barn-door case that brakes a spin,
+/// falling out of the same geometry as the steering force instead of
+/// needing a separate mechanism.
+///
+/// A foil overtaken by the flow (|α| > 90°: making sternway, or
+/// crash-stopping through its own wake) is still a foil with the other
+/// edge leading, so fold by ±π first and serve all four quadrants from
+/// one curve — this single fold is what makes steering reverse correctly
+/// when backing, with zero special cases.
+fn rudder_lift_drag(alpha: f32) -> (f32, f32) {
     use std::f32::consts::{FRAC_PI_2, PI};
+    const CD0: f32 = 0.01;
     let mut a = alpha;
     if a > FRAC_PI_2 {
         a -= PI;
@@ -227,17 +264,22 @@ fn rudder_cl(alpha: f32) -> f32 {
         a += PI;
     }
     let mag = a.abs();
-    let linear = 2.0 * PI * RUDDER_AR / (RUDDER_AR + 2.0) * mag;
-    let plate = 0.9 * (2.0 * mag).sin();
-    let cl = if mag <= RUDDER_STALL_ON {
-        linear
+    let lin_slope = 2.0 * PI * RUDDER_AR / (RUDDER_AR + 2.0);
+    let cl_lin = lin_slope * mag;
+    let cd_lin = CD0 + cl_lin * cl_lin / (PI * RUDDER_AR);
+    let s = mag.sin();
+    let cn = CD_FLAT_PLATE * s * s;
+    let cl_plate = cn * mag.cos();
+    let cd_plate = cn * s + CD0;
+    let (cl, cd) = if mag <= RUDDER_STALL_ON {
+        (cl_lin, cd_lin)
     } else if mag < RUDDER_STALL_OFF {
         let t = (mag - RUDDER_STALL_ON) / (RUDDER_STALL_OFF - RUDDER_STALL_ON);
-        linear * (1.0 - t) + plate * t
+        (cl_lin * (1.0 - t) + cl_plate * t, cd_lin * (1.0 - t) + cd_plate * t)
     } else {
-        plate
+        (cl_plate, cd_plate)
     };
-    cl.copysign(a)
+    (cl.copysign(a), cd)
 }
 
 // ---------------------------------------------------------------------------
@@ -591,23 +633,18 @@ impl Sim {
         // damping moments set how fast yaw builds, and the built-up yaw in
         // turn feeds the rudder's angle of attack (a boat with a spinning
         // stern has its rudder self-damp the spin, which is why a fin
-        // keeler still tracks at all).
+        // keeler still tracks at all). This is now the ONLY place the
+        // rudder's physical footprint acts — the keel profile no longer
+        // paints it (see `keel.rs`), so there's nothing left to
+        // double-count, and the blade's resistance to a spin is exactly
+        // as stale or as fresh as its actual angle to the actual flow.
         let flow = Vec2::new(-surge, -(sway + w * RUDDER_X));
         let rud_pt = pos + fwd * RUDDER_X;
         if flow.length_squared() > 1e-6 {
             let fhat = flow / flow.length();
             let chord = Vec2::new(-delta.cos(), delta.sin()); // stock → trailing edge
             let alpha = chord.perp_dot(fhat).atan2(chord.dot(fhat));
-            let cl = rudder_cl(alpha);
-            // Lift + lift-INDUCED drag only. The blade's passive broadside
-            // drag is deliberately NOT here: the keel profile's lateral
-            // area already covers the rudder-at-rest as one of its strips
-            // (the fin preset paints it at this very station), so a
-            // parasitic sin²α term would double-count what the profile
-            // integrals already apply. The foil owns exactly the forces a
-            // drag-strip model cannot produce: circulation lift and the
-            // drag that lift induces.
-            let cd = 0.01 + cl * cl / (std::f32::consts::PI * RUDDER_AR);
+            let (cl, cd) = rudder_lift_drag(alpha);
             let q = 0.5 * RHO_WATER * RUDDER_AREA * flow.length_squared();
             let f_local = Vec2::new(-fhat.y, fhat.x) * (q * cl) + fhat * (q * cd);
             let f_rudder = fwd * f_local.x + side * f_local.y;
@@ -807,10 +844,21 @@ mod tests {
             sym.tick(&Env::CALM, &InputState::NEUTRAL);
         }
         let (vs, _) = sym.boat_vel();
+        // A symmetric KEEL profile has no `swept_moment` coupling of its
+        // own — but the rudder is a separate, always-aft foil now (see
+        // `keel.rs`'s module doc comment), independent of whatever profile
+        // is loaded, and it still sees a large angle of attack from the
+        // spin and still drags the stern toward starboard by itself. So
+        // the honest control isn't "zero drift" any more, it's "less
+        // drift than the aft-biased hull" — the keel's own asymmetry
+        // stacks on top of the same baseline rudder contribution both
+        // sims share.
         assert!(
-            vs.length() < 0.005,
-            "symmetric profile should not drift from a pure spin, got |v| = {}",
-            vs.length()
+            vs.y < 0.0 && vs.y.abs() < v.y.abs(),
+            "a symmetric keel should still drift less than the aft-biased default \
+             (rudder-only coupling, no keel swept_moment on top): got vs.y = {} vs default vy = {}",
+            vs.y,
+            v.y
         );
     }
 
@@ -964,12 +1012,23 @@ mod tests {
         // folded by π so a backing foil reads the same curve. CL at
         // hard-over (35° => 0.611 rad) sits BELOW the pre-stall peak —
         // more helm is not always more turn.
-        assert!(rudder_cl(0.28) > rudder_cl(0.611));
-        assert!((rudder_cl(-0.28) + rudder_cl(0.28)).abs() < 1e-6, "lift curve must be odd");
+        assert!(rudder_lift_drag(0.28).0 > rudder_lift_drag(0.611).0);
         assert!(
-            (rudder_cl(0.28 - std::f32::consts::PI) - rudder_cl(0.28)).abs() < 1e-5,
+            (rudder_lift_drag(-0.28).0 + rudder_lift_drag(0.28).0).abs() < 1e-6,
+            "lift curve must be odd"
+        );
+        assert!(
+            (rudder_lift_drag(0.28 - std::f32::consts::PI).0 - rudder_lift_drag(0.28).0).abs()
+                < 1e-5,
             "folding by pi must land on the same curve (backing foil)"
         );
+        // The flat-plate law this now falls back to past stall is LARGEST
+        // at 90°, not smallest — the barn-door case (a centered rudder
+        // swept broadside by the hull's own spin) must brake it, not go
+        // silent the way a lift-only curve would.
+        let (cl_90, cd_90) = rudder_lift_drag(std::f32::consts::FRAC_PI_2);
+        assert!(cl_90.abs() < 1e-3, "a blade square to the flow produces no lift, got {cl_90}");
+        assert!(cd_90 > 1.5, "a blade square to the flow should be near-maximum drag, got {cd_90}");
 
         // And the behaviour it buys: the INITIAL helm bite. Slammed
         // hard-over the blade starts stalled and bites more weakly than a
@@ -1001,7 +1060,8 @@ mod tests {
     fn backing_reverses_the_helm() {
         // Making sternway the flow comes over the blade from astern, so
         // the same helm yaws the boat the other way (and the stern, which
-        // now leads, seeks the helm side) — the fold in `rudder_cl` at
+        // now leads, seeks the helm side) — the fold in `rudder_lift_drag`
+        // at
         // work. Same injected speed magnitude both ways, engine off.
         let heading_after = |u: f32| {
             let mut sim = Sim::new();

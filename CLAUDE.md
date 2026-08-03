@@ -99,7 +99,14 @@ icons + revision injection; `.github/actions/sync-pages-branch` = commit into
   bar chart to paint the underwater area distribution, two presets (fin/long
   keel), live-derived readout, Apply respawns the boat via
   `Sim::new_with_keel`. Frontend-only — hands a plain `KeelProfile` value to
-  sim-core, never reaches into physics directly.
+  sim-core, never reaches into physics directly. Also draws a fixed,
+  non-paintable rudder marker (2026-08-03) at `sim::{RUDDER_X,
+  RUDDER_CHORD, RUDDER_DEPTH}` — the same `pub` constants the physics
+  uses, not a separate guess — stacked BELOW whatever the curve is at
+  that station (not from the baseline) so it reads as an appendage
+  hanging off the hull rather than overlapping the editable area; needed
+  once the rudder stopped being part of the paintable profile (see the
+  Keel profile bullet under Simulation model).
 - `index.html` — web wrapper: boot guard (standalone script ahead of the
   bundle that paints script errors on screen), loading overlay,
   `__GIT_REVISION__` placeholder (deploy-time sed → wasm `?v=` cache-buster),
@@ -211,24 +218,61 @@ like Pegasus.
   |thrust|: `PROP_WALK_AHEAD` 0.06 (stern nudges starboard) vs
   `PROP_WALK_ASTERN` 0.13 (stern kicks port — "backs to port",
   `a_burst_astern_walks_the_stern_to_port`).
-- **Rudder** (constants in sim.rs, blade at `RUDDER_X` −5.9 m, 0.54 m²,
-  ±35°): a foil in the LOCAL water-relative flow at the stern — surge/sway
-  PLUS the yaw sweep `w·RUDDER_X`, which is the rudder half of the keel
-  coupling (the keel's moments set how fast yaw builds; built-up yaw feeds
-  the rudder's angle of attack and self-damps the spin). Lift curve
-  `rudder_cl`: linear slope 2π·AR/(AR+2) ≈ 3.8 to ~17°, blended to
-  flat-plate `0.9·sin 2α` past ~25° (no force step at stall), and FOLDED by
-  ±π — a foil overtaken by the flow is still a foil, which is the whole
-  backing-steering story with zero special cases
-  (`backing_reverses_the_helm`). Stall shows up as a mushier INITIAL bite
-  hard-over (`hard_over_stalls`) — at steady state the yaw feedback eases
-  the effective angle back toward the slope, so hard-over still out-turns
-  moderate helm, just draggier (that's real low-AR-rudder behaviour, don't
-  "fix" it). The foil contributes ONLY lift + induced drag (`CL²/(π·AR)`):
-  its passive broadside drag is already a strip of the keel profile (see
-  keel.rs module doc), so a parasitic `sin²α` term here would double-count
-  — and would break the symmetric-profile control in
-  `spinning_an_aft_biased_hull_shoves_it_to_starboard`. **Prop wash**:
+- **Rudder** (constants in sim.rs, blade at `RUDDER_X` −5.9 m,
+  `RUDDER_CHORD` 0.4 m × `RUDDER_DEPTH` 1.35 m = 0.54 m², ±35°, all `pub`
+  so the keel editor can draw the blade at its true size/position): a
+  foil in the LOCAL water-relative flow at the stern — surge/sway PLUS the
+  yaw sweep `w·RUDDER_X`, which is the rudder half of the keel coupling
+  (the keel's moments set how fast yaw builds; built-up yaw feeds the
+  rudder's angle of attack). `rudder_lift_drag` (2026-08-03 rewrite,
+  replacing the old `rudder_cl`): linear thin-airfoil slope
+  2π·AR/(AR+2) ≈ 3.8/rad to ~17° (unchanged — this regime was never the
+  problem) blended into Hoerner's flat-plate normal-force law
+  (`CD_FLAT_PLATE` ≈ 1.98, a literature constant, not fitted — the
+  Viterna–Corrigan technique used to extend wind-turbine blade sections
+  past stall) past ~25°, resolved into lift/drag by the chord-to-flow
+  angle, folded by ±π so a foil overtaken by the flow (backing) is still a
+  foil (`backing_reverses_the_helm`). **The old post-stall curve
+  (`0.9·sin 2α` lift, induced-drag-only `cd`) was backwards at the one
+  angle that matters most**: both collapse toward ZERO at α=90°, exactly
+  when a CENTERED rudder is swept broadside by the hull's own spin — so a
+  boat spinning with the helm amidships got almost no rudder resistance
+  from it, however hard it was actually spinning. The Hoerner law instead
+  peaks at α=90° (zero lift, max drag — the barn-door case), so a centered
+  blade correctly brakes a spin using the exact same live-angle
+  calculation that lets a deflected blade drive a turn — no separate
+  mechanism, no risk of the two disagreeing.
+  The foil owns the rudder's ENTIRE physical footprint now: `keel.rs`'s
+  presets no longer paint it as a fixed area strip (see that module's own
+  notes) — the old split (profile owns "at rest", foil owns "deflected")
+  meant a hard-over, actively-turning blade was STILL charged the full
+  passive drag of a centered one, fighting its own turn. Verified by
+  `rudder_lift_drag`'s own test asserting near-zero lift / near-max drag
+  at 90°, and by `spinning_an_aft_biased_hull_shoves_it_to_starboard`'s
+  "symmetric keel" control, which now drifts SOME on its own (the rudder's
+  fixed aft position couples to spin regardless of keel symmetry) but
+  reliably less than the aft-biased default — the keel's own
+  `swept_moment` stacking on top of the shared rudder baseline, not a
+  separate zero/nonzero split like before.
+  **Gotcha (2026-08-03, verify physics fixes against the benchmark that
+  motivated them, don't assume)**: this fix does NOT, by itself, reproduce
+  a tight prop-walk-free backing turn (real small-boat mooring-class
+  benchmark: ~90° of turn within ~2 boat lengths at ~2.5 kn, rudder only,
+  engine in neutral) — a from-rest transient check after the fix showed
+  *less* turn over the same distance than before, because the corrected
+  curve's peak lift (~0.76 at ~55°) sits above `RUDDER_MAX_DEG` (35°),
+  while the old (wrong) `0.9·sin 2α` curve happened to peak near 45°,
+  closer to the actual achievable hard-over angle. The spin-braking fix is
+  real and correct; closing that remaining gap is a separate, still-open
+  question (candidates: is 35° actually the right hard-over limit once
+  the lift curve is honest, is `RUDDER_AREA` sized right, does neutral-gear
+  prop drag/walk need modeling) — don't fold a fudge into this curve to
+  chase that number, verify against a fresh transient run instead. Stall
+  still shows up as a mushier INITIAL bite hard-over
+  (`hard_over_stalls`) — at steady state the yaw feedback eases the
+  effective angle back toward the slope, so hard-over still out-turns
+  moderate helm, just draggier (that's real low-AR-rudder behaviour,
+  don't "fix" it). **Prop wash**:
   thrust-deflection form `K_WASH·max(T,0)·sin δ` at the blade — steerage
   from a standing start ahead (THE harbour move: burst of power kicks the
   bow before the boat gathers way), nothing astern (the wash misses the
@@ -292,6 +336,16 @@ like Pegasus.
   (hand-tuned close to, not identical to, the legacy constants);
   `Sim::new_with_keel(&profile)` takes any other profile — used by the
   keel editor.
+  **The rudder is no longer part of any preset** (2026-08-03) — `fin_keel()`
+  used to paint it as a fixed area strip at the stern, which double-counted
+  it against the live rudder foil in `sim.rs` (see the Rudder bullet
+  above); that strip is gone, so `fin_keel()` is now fore-aft symmetric
+  (`clr_offset` = 0) and its yaw damping dropped by roughly half.
+  `default_sailboat()` and `long_keel()` were never built from named
+  rudder-shaped constants the way `fin_keel()` was, so they're untouched
+  by this — if their stern-heavy shape also implicitly bakes in some of
+  the rudder's footprint, that's an open question for whoever tunes them
+  next via the (now-corrected) editor, not something guessed at here.
 - **Determinism rules (inherited verbatim from Pegasus)**: fresh `Sim` per
   run — never reuse one across runs (Rapier handle numbering / warm-start
   caches); all forces inside `tick` only; no wall clock, no `gen_range`, no
