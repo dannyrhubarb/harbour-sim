@@ -311,3 +311,15 @@ required attribution header — keep it when replacing the bundle.
 - Same rules as Pegasus: curate branches before rebase-merging to `main`;
   the wasm binary is **not tracked** (gitignored) — deploy builds it from
   source; `git fetch origin main && git rebase origin/main` before PRs.
+- **Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)**:
+  `<type>[optional scope]: <description>`, e.g. `fix(keel): clamp yaw damping
+  to a minimum`. Common types here: `feat`, `fix`, `docs`, `refactor`,
+  `test`, `chore`, `ci`, `perf`. Breaking changes get a `!` before the colon
+  (`feat!: ...`) or a `BREAKING CHANGE:` footer. This applies to every
+  commit, not just the final one on a branch — squash-merges take their
+  message from the PR, but intermediate commits still get read individually
+  during review and bisection.
+- **PR titles follow the same convention** where the hosting platform
+  allows it (GitHub does — the title becomes the squash-merge commit
+  message), so a PR should be titled like a Conventional Commits subject
+  line too, e.g. `feat(ropes): add bow line fairlead`.
