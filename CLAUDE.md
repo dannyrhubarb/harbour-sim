@@ -350,22 +350,81 @@ like Pegasus.
   (`prop_wash_steers_at_rest_ahead_but_not_astern`). Chosen over a
   slipstream-velocity model because the deflected momentum flux IS the
   thrust — bounded by construction, no ad-hoc cap.
-- **Axial water drag is asymmetric fore/aft** like the windage below:
-  `CD_WATER_BOW` 0.15 (fine entry) vs `CD_WATER_STERN` 0.35 (transom
-  first), selected by the sign of the water-relative surge. The old single
-  `CD_WATER_FRONT = 0.5` was a blunt-body placeholder tuned before anything
-  could drive the boat — against it no realistic bollard pull passes
-  ~1.9 m/s, so it was retuned when the engine arrived (the equilibrium math
-  lives with the thrust constants).
-- **Hydrodynamics**: quadratic + linear drag on the velocity RELATIVE TO THE
-  WATER, split into surge (easy) / sway (hard) components via the real
-  ρ·Cd·A formulas — a uniform current is just "the water moves", so the same
-  term both damps the boat and carries it along. The **linear terms are
-  deliberate**: quadratic drag vanishes at low speed, so alone it neither
-  stops a creeping boat nor converges to current speed; world-frame Rapier
-  damping would fight the current instead (holds the boat below water
-  speed), so all drag lives in `tick`, relative to the water, and the body's
-  Rapier damping is 0.
+- **Axial (surge) water resistance is ITTC-1957 skin friction, not a bluff-body
+  Cd** (2026-08-03 rewrite, replacing `CD_WATER_BOW`/`CD_WATER_STERN`/
+  `WATER_AREA_FRONT`). The old model applied a frontal-area × flat-Cd bluff
+  -body formula underwater — the same functional form correctly used for
+  windage on the topsides, but wrong here: this hull's Froude number even
+  at 3 kn is only ~0.14, well below the ~0.35–0.45 where wave-making
+  resistance (a real bluff-body-like effect) matters, so real resistance at
+  cruising speed is overwhelmingly skin friction over the WETTED SURFACE, a
+  different mechanism with a much smaller coefficient (~0.003, not
+  ~0.15–0.5) over a much larger area (wetted surface, tens of m², not
+  frontal area, a few m²). Diagnosed from a real complaint: the boat lost
+  way from 3 kn to 1 kn in ~17 m; real boats this size are still above 1 kn
+  past 100 m.
+  - `ittc57_cf(re) = 0.075/(log10(re)-2)²`, the standard formula (ITTC's
+    own recommended procedure 7.5-02-02-02) — `Re=0` correctly gives
+    `Cf=0` via IEEE float arithmetic (`log10(0)=-inf`) with no
+    special-casing.
+  - `wetted_surface_area()` integrates a per-station semi-ellipse girth
+    (`π/2·(half-beam+draught)`) along `HULL_PTS`' own beam curve and the
+    keel profile's own draught curve (see the Keel profile bullet — profile
+    values are real depth now, not tuned for feel), plus the rudder's own
+    wetted area added separately (a movable appendage the profile excludes)
+    — computed once per `Sim` from real modeled geometry, not an assumed
+    whole-boat average.
+  - `HULL_FORM_FACTOR = 1.2` (`(1+k)`, correcting the ITTC line's flat-plate
+    calibration for a real 3D hull's viscous pressure resistance) is the
+    ONE number in this whole model that isn't either read from the sim's
+    own geometry or a fixed physical formula — a typical value (1.1–1.3)
+    for a fine sailing hull, not fitted to hit a target.
+  - No fore/aft asymmetry any more: friction depends on wetted area and
+    speed, not which end leads, and this hull tapers to a point at both
+    ends (`HULL_PTS`) rather than presenting a flat transom to separate
+    flow off. No added low-speed linear term either — though NOT because
+    Cf falls with speed (the first version of this claim had the
+    mechanism backwards, caught in maintainer review): `Cf` actually
+    RISES slowly as Re falls (~1/log²Re), and the FORCE converges to
+    zero at rest because the u² factor collapses far faster than Cf's
+    logarithmic growth.
+  - **Verified, not just derived**: `coasting_from_cruising_speed_covers_a_realistic_distance`
+    checks a basin-safe slice of the actual benchmark (the ±40 m harbour
+    basin, plus the hull's own 6 m bow overhang, means a real 100 m
+    straight-line run hits the wall around 34 m — full-scale verification
+    of the 3→1 kn distance (~99 m, matching the ~100 m benchmark closely)
+    was done by integrating the real `tick()` formula offline, not inside
+    `Sim`).
+  - **Consequence, not patched**: fixing the low-speed regime correctly
+    EXPOSED that the model has no wave-making resistance term — full-throttle
+    equilibrium is now ~4.85 m/s (9.4 kn), above this hull's classic
+    displacement hull speed (~8.4 kn), not achievable on 28 hp in reality.
+    The old bluff-body coefficient was accidentally capping top speed at a
+    plausible number while being wrong at low speed; the honest fix is a
+    real, Froude-number-shaped wave-making term, left open rather than
+    papered over by re-inflating the friction coefficient (see the gotcha
+    on `T_BOLLARD_AHEAD`). Two lessons in one: a coefficient tuned to look
+    right at one speed can be very wrong at another, and fixing one regime
+    honestly can uncover what was quietly covering for a missing one.
+  - Also surfaced the same "was calibrated to the old, too-strong drag"
+    issue on the OTHER side of the same formula:
+    `current_carries_the_boat_along` (a moored boat picked up by a current
+    from a dead stop) is the mirror image of coasting to a stop — same
+    weak-friction-at-low-relative-speed physics, so it's now also
+    correctly slower, and its threshold/duration were updated to match
+    real behaviour instead of the old too-fast pickup.
+- **Sway/yaw hydrodynamics** (unaffected by the above — still quadratic +
+  linear drag on velocity RELATIVE TO THE WATER, via the real ρ·Cd·A
+  formulas): a uniform current is just "the water moves", so the same term
+  both damps the boat and carries it along. The linear terms ARE still
+  deliberate here (unlike surge, which dropped its linear term — see
+  above): sway/yaw's quadratic coefficients are keel-profile-derived, and
+  a profile far from the one a fixed linear floor was tuned against would
+  fall out of proportion, so each uses a crossover speed/rate scaled by the
+  profile's own quadratic coefficient instead. World-frame Rapier damping
+  would fight a current instead of converging to it (holds the boat below
+  water speed), so all drag lives in `tick`, relative to the water, and the
+  body's Rapier damping is 0.
 - **Force application points create the characteristic behaviours**: lateral
   wind force acts slightly FORWARD of centre (`WIND_CENTER_OFFSET > 0`, bow
   windage → the bow falls off downwind). Tune behaviour there, not with

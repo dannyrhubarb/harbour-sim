@@ -72,27 +72,17 @@ pub const HULL_PTS: [(f32, f32); 8] = [
 const RHO_AIR: f32 = 1.2;
 const RHO_WATER: f32 = 1025.0;
 
-// Projected areas (m²): underwater frontal, and windage lateral / frontal.
-// The underwater LATERAL area isn't a flat constant any more — it, its
-// lever arm, and the yaw damping coefficient are all derived together from
-// a `KeelProfile` (see keel.rs), since they're moments of the same
-// underlying area distribution along the hull.
-const WATER_AREA_FRONT: f32 = 3.0;
+// Projected areas (m²): windage lateral / frontal. The underwater LATERAL
+// area isn't a flat constant any more — it, its lever arm, and the yaw
+// damping coefficient are all derived together from a `KeelProfile` (see
+// keel.rs), since they're moments of the same underlying area distribution
+// along the hull. The underwater AXIAL resistance isn't a flat frontal-area
+// constant either any more — see the ITTC-1957 block below.
 const WIND_AREA_LAT: f32 = 18.0; // hull side + superstructure above water
 const WIND_AREA_FRONT: f32 = 7.0;
 
 // Drag coefficients.
 const CD_WATER_LAT: f32 = 1.1;
-// Axial water drag is asymmetric like the axial windage below: bow-first is
-// a fair entry that parts the water (a hull's frontal-area Cd is far below a
-// blunt body's), stern-first drags the flat transom through it. The old
-// single CD_WATER_FRONT = 0.5 was a blunt-body placeholder tuned before
-// anything could drive the boat; against it no realistic bollard pull gets
-// past ~1.9 m/s, so it was retuned when the engine arrived (equilibrium
-// math on the thrust constants below). Selected by the sign of the
-// water-relative surge in `tick`.
-const CD_WATER_BOW: f32 = 0.15;
-const CD_WATER_STERN: f32 = 0.35;
 const CD_AIR_LAT: f32 = 1.0;
 // Axial windage isn't symmetric fore/aft the way the water-drag terms are:
 // the bow is a fine entry with a sprayhood shaped to deflect airflow when
@@ -112,25 +102,121 @@ pub fn yaw_damping_coefficient(cubic_moment: f32) -> f32 {
     0.5 * RHO_WATER * CD_WATER_LAT * cubic_moment
 }
 
-// Linear drag terms, also relative to the water. Quadratic drag vanishes at
-// low speed, so on its own the boat would creep forever; a linear term makes
-// it converge — to a stop in still water, to the current's own velocity in a
-// stream (world-frame Rapier damping would instead fight the current and
-// hold the boat below water speed, so the drag lives here in the sim).
-const K_LIN_SURGE: f32 = 200.0; // N per m/s
+// ---------------------------------------------------------------------------
+// Axial (surge) hull resistance: ITTC-1957 skin friction
+// ---------------------------------------------------------------------------
+//
+// The old model applied a bluff-body drag formula (frontal area × a flat
+// Cd) underwater — the same functional form correctly used for windage on
+// the topsides above, but wrong here: this hull's Froude number even at 3
+// kn is ~0.14, well below the ~0.35-0.45 where wave-making resistance (a
+// real bluff-body-like effect) matters. Below that, real hull resistance is
+// overwhelmingly skin friction over the WETTED SURFACE, not the frontal
+// area, and the coefficient is a friction coefficient (~0.003), not a bluff
+// body's (~0.15-0.5) — using the wrong mechanism made the boat decelerate
+// roughly 6x too fast coasting from cruising speed (measured: 3 kn -> 1 kn
+// in ~17 m; real boats this size are still above 1 kn past 100 m).
+//
+// Kinematic viscosity of seawater (m²/s, ~15°C) — the standard value paired
+// with the ITTC-1957 line.
+const NU_WATER: f32 = 1.19e-6;
+/// Hull form factor `(1+k)`: the ITTC-1957 line is calibrated to a flat
+/// plate, so a real 3D hull's viscous PRESSURE resistance (beyond pure
+/// friction) needs this correction on top. ~1.1-1.3 is the typical range
+/// for a fine displacement sailing hull in naval-architecture practice
+/// (Holtrop-Mennen-style form-factor estimates land here for slender
+/// hulls); this boat, a fairly slender ~39 ft cruiser, sits toward the lean
+/// end. The one number in this whole model that isn't either read from the
+/// sim's own geometry or a fixed physical formula — everything else below
+/// derives from `HULL_PTS`/`KeelProfile` (real modeled geometry) and
+/// `NU_WATER`/the ITTC formula (fixed physics).
+const HULL_FORM_FACTOR: f32 = 1.2;
 
-// Sway and yaw's linear terms are NOT flat constants like surge's — sway and
-// yaw's quadratic terms are keel-profile-derived (`self.keel.area`,
-// `self.keel.cubic_moment`), so a flat linear floor would silently fall out
-// of proportion for any profile far from the one it was tuned against (an
-// extreme fin keel would keep a full keel's low-speed damping; an extreme
-// full keel would keep a fin keel's). Instead each is the SAME crossover
-// idea as `K_LIN_SURGE` — "below this speed, linear damping takes over from
-// quadratic" — expressed as a speed/rate and scaled by the profile's own
+/// ITTC-1957 model-ship correlation line: the standard formula for a hull's
+/// skin-friction coefficient from its Reynolds number. `Re = 0` (dead stop)
+/// correctly gives `Cf = 0` (no relative motion, no friction) with no
+/// special-casing needed: `log10(0) = -inf` in IEEE float arithmetic, so
+/// the denominator diverges and the fraction goes to 0, not NaN.
+fn ittc57_cf(re: f32) -> f32 {
+    0.075 / (re.log10() - 2.0).powi(2)
+}
+
+/// Hull length (m), read from `HULL_PTS`' own extent — the hull outline is
+/// already the single source of truth for geometry, this just measures it
+/// instead of a separate LOA constant that could drift out of sync.
+fn hull_length() -> f32 {
+    let (lo, hi) = HULL_PTS
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(lo, hi), &(x, _)| (lo.min(x), hi.max(x)));
+    hi - lo
+}
+
+/// Local half-beam (m) at hull station `x`, interpolated from `HULL_PTS`'
+/// own upper (y >= 0) half — bow tip to stern point, the first 5 of its 8
+/// points (see the array's own layout: bow, CCW around the port side to
+/// the stern point, then back up the starboard side). Reads the hull's
+/// real beam curve instead of assuming a flat average.
+fn hull_half_beam(x: f32) -> f32 {
+    let upper = &HULL_PTS[..5];
+    let (bow_x, bow_b) = upper[0];
+    let (stern_x, stern_b) = upper[upper.len() - 1];
+    if x >= bow_x {
+        return bow_b;
+    }
+    if x <= stern_x {
+        return stern_b;
+    }
+    for w in upper.windows(2) {
+        let (x0, b0) = w[0];
+        let (x1, b1) = w[1];
+        if x <= x0 && x >= x1 {
+            let t = (x0 - x) / (x0 - x1);
+            return b0 + (b1 - b0) * t;
+        }
+    }
+    0.0
+}
+
+/// Wetted surface area (m²) below the waterline, integrated from the
+/// ACTUAL modeled geometry instead of an assumed whole-boat average:
+/// `HULL_PTS`' beam at each station and the keel profile's draught at each
+/// station (see `keel.rs` — profile values are real depth, not a curve
+/// shaped for feel). Per-station girth uses a semi-ellipse approximation
+/// (`π/2·(half-beam + draught)`), the standard quick-hydrostatics method
+/// for a rounded hull section — the sim has no true 3D hull lines to
+/// integrate exactly, this is the best a 2D top-down outline + a
+/// depth-per-length profile can do. The rudder's own wetted area (both
+/// faces) is added separately since it's a movable appendage the profile
+/// deliberately excludes (see `keel.rs`'s module doc comment).
+fn wetted_surface_area(profile: &KeelProfile) -> f32 {
+    const SUBSTEPS: usize = 64;
+    use std::f32::consts::FRAC_PI_2;
+    let (x0, x1) = HULL_PTS
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(lo, hi), &(x, _)| (lo.min(x), hi.max(x)));
+    let girth = |x: f32| FRAC_PI_2 * (hull_half_beam(x) + profile.sample(x));
+    let dx = (x1 - x0) / SUBSTEPS as f32;
+    let mut wsa = 0.0f32;
+    for i in 0..SUBSTEPS {
+        let xa = x0 + i as f32 * dx;
+        let xb = xa + dx;
+        wsa += 0.5 * (girth(xa) + girth(xb)) * dx;
+    }
+    wsa + 2.0 * RUDDER_CHORD * RUDDER_DEPTH
+}
+
+// Sway and yaw keep a linear low-speed term (surge no longer has one — see
+// below) because their quadratic terms are keel-profile-derived
+// (`self.keel.area`, `self.keel.cubic_moment`), so a flat linear floor
+// would silently fall out of proportion for any profile far from the one
+// it was tuned against (an extreme fin keel would keep a full keel's
+// low-speed damping; an extreme full keel would keep a fin keel's).
+// Instead each is a crossover speed/rate scaled by the profile's own
 // quadratic coefficient, so the crossover point stays put as the profile
-// changes instead of the absolute force. The crossover values themselves are
-// hand-picked to land close to (not identical to) the old flat 1500 N/(m/s)
-// and 50_000 N·m/(rad/s) this replaces, at the default profile.
+// changes instead of the absolute force. Surge doesn't need this — not
+// because Cf falls at low speed (it slowly RISES as Re drops, ~1/log²Re),
+// but because the surge force's u² factor collapses far faster than that
+// growth — see the comment on `tick`'s surge drag term.
 const SWAY_LIN_CROSSOVER_SPEED: f32 = 0.22; // m/s
 const YAW_LIN_CROSSOVER_RATE: f32 = 0.14; // rad/s
 
@@ -157,13 +243,25 @@ pub const START_HEADING: f32 = 0.0;
 // ---------------------------------------------------------------------------
 
 // A ~28 hp auxiliary diesel (≈21 kW shaft) with a fixed 3-blade prop, at the
-// ~0.2 kN-per-kW bollard-pull rule of thumb. Equilibrium against the surge
-// drag above (230.6·u² + 200·u, bow-first) with the advance-speed falloff
-// below: full ahead ≈ 3.2 m/s (6.2 kn), half throttle ≈ 1.5 m/s — a boat
-// that motors below hull speed, as auxiliaries do.
+// ~0.2 kN-per-kW bollard-pull rule of thumb. Equilibrium against the ITTC
+// surge drag above, at the default profile: full ahead ≈ 4.85 m/s (9.4 kn),
+// half throttle ≈ 2.4 m/s, full astern ≈ 4.4 m/s.
+//
+// GOTCHA (2026-08-03, flagged not patched): 9.4 kn is above this hull's
+// classic displacement hull speed (1.34·√LWL_ft ≈ 8.4 kn) — not physically
+// achievable on 28 hp, because nothing in `tick` yet models wave-making
+// resistance, which is what actually caps a displacement hull near there
+// (negligible at the low Froude numbers the ITTC fix targeted, ~0.07-0.14
+// at 1-3 kn, but very much NOT negligible approaching Fn≈0.4, ~8 kn for
+// this LWL). Fixing the low-speed friction model correctly is exactly what
+// EXPOSED this — the old bluff-body coefficient was accidentally capping
+// top speed at a plausible-looking number while also being wrong at low
+// speed. The honest fix is a wave-making term (real, Froude-number-shaped,
+// same standard as the friction fix), not re-inflating the friction
+// coefficient to paper over a different, unmodeled effect — left open
+// rather than patched.
 const T_BOLLARD_AHEAD: f32 = 4200.0; // N
-// A prop pitched for ahead delivers much less astern; also keeps the astern
-// equilibrium (~1.9 m/s against the blunt transom's CD_WATER_STERN) sane.
+// A prop pitched for ahead delivers much less astern.
 const ASTERN_RATIO: f32 = 0.6;
 /// Advance speed (m/s) at which a full-throttle prop stops delivering
 /// thrust ("races"). Thrust falls off quadratically in the advance ratio
@@ -410,6 +508,14 @@ pub struct Sim {
     /// Underwater lateral-area moments (area, CLR lever arm, yaw damping
     /// integral), derived once from a `KeelProfile` at construction.
     keel: KeelDerived,
+    /// Wetted surface area (m²), integrated once from `HULL_PTS` + the
+    /// keel profile at construction — see `wetted_surface_area`. Feeds the
+    /// ITTC-1957 axial friction term in `tick`.
+    wetted_surface: f32,
+    /// Hull length (m), read from `HULL_PTS` once at construction — the
+    /// Reynolds number in `tick`'s axial friction term needs it every tick,
+    /// cheaper to cache than refold `HULL_PTS` each time.
+    hull_length: f32,
     /// Spooled engine response, -1..=1: the throttle input filtered through
     /// `THROTTLE_TAU`. Sim state (not input) — advanced only inside `tick`,
     /// reset for free by the fresh-`Sim`-per-run rule.
@@ -445,6 +551,8 @@ impl Sim {
     /// displacement. Used by the keel editor's Apply.
     pub fn new_with_design(design: &BoatDesign) -> Sim {
         let keel = design.keel.derive();
+        let wetted_surface = wetted_surface_area(&design.keel);
+        let hull_length = hull_length();
         let mut bodies = RigidBodySet::new();
         let mut colliders = ColliderSet::new();
 
@@ -522,6 +630,8 @@ impl Sim {
             gravity: vector![0.0, 0.0],
             boat,
             keel,
+            wetted_surface,
+            hull_length,
             engine: 0.0,
             ticks: 0,
         }
@@ -604,12 +714,22 @@ impl Sim {
         let vr = v - env.current_vel();
         let surge = vr.dot(fwd);
         let sway = vr.dot(side);
-        // surge > 0: moving bow-first through the water (fine entry);
-        // surge < 0: transom-first (blunt).
-        let cd_water_ax = if surge > 0.0 { CD_WATER_BOW } else { CD_WATER_STERN };
-        let f_surge = -fwd
-            * (0.5 * RHO_WATER * cd_water_ax * WATER_AREA_FRONT * surge * surge.abs()
-                + K_LIN_SURGE * surge);
+        // Axial (surge) resistance: ITTC-1957 skin friction over the actual
+        // wetted surface, not a bluff-body Cd over frontal area — see the
+        // block comment above `NU_WATER`. No fore/aft asymmetry: friction
+        // depends on wetted area and speed, not on which end leads (unlike
+        // the windage below, this hull doesn't have a flat transom to
+        // separate flow off — HULL_PTS tapers to a point at both ends).
+        // No added low-speed linear term either — but for the right
+        // reason (maintainer review caught the first version of this
+        // comment stating the mechanism BACKWARDS): Cf actually RISES
+        // slowly as Re falls (~1/log²Re). The FORCE still converges
+        // cleanly to zero at rest because the u² factor below collapses
+        // far faster than Cf's logarithmic growth. It's the product that
+        // vanishes, not the coefficient.
+        let re = surge.abs() * self.hull_length / NU_WATER;
+        let cf = ittc57_cf(re) * HULL_FORM_FACTOR;
+        let f_surge = -fwd * (0.5 * RHO_WATER * cf * self.wetted_surface * surge * surge.abs());
         let f_sway = -side
             * (0.5 * RHO_WATER * CD_WATER_LAT * self.keel.area * sway * sway.abs()
                 + k_lin_sway(self.keel.area) * sway);
@@ -777,6 +897,40 @@ mod tests {
     }
 
     #[test]
+    fn coasting_from_cruising_speed_covers_a_realistic_distance() {
+        // The benchmark that motivated the ITTC-1957 friction rewrite: a
+        // real small cruising sailboat losing way from ~3 kn with no
+        // engine/wind/current is still above ~1 kn past 100 m — the old
+        // bluff-body drag model covered that whole speed drop in ~17 m (a
+        // ~6x-too-fast stop), and full-scale offline integration of the new
+        // model against the real tick() formula lands the 3 kn -> 1 kn
+        // distance at ~99 m, matching the benchmark almost exactly (see
+        // CLAUDE.md's Rudder/hull-resistance section for that derivation).
+        //
+        // Can't run that full 100 m through the actual Sim here, though:
+        // the harbour basin is only ±40 m (BASIN_HALF_W), and the hull's
+        // own bow sticks 6 m out in front of the tracked centre, so it hits
+        // the east wall around 34 m of straight-line travel. So this
+        // checks a basin-safe slice instead — at a fixed 20 s / ~27 m in
+        // (comfortably short of the wall), the boat should still be well
+        // above 1 kn, whereas the OLD model would already have been at 1
+        // kn by 17 m and effectively stopped by here.
+        let mut sim = Sim::new();
+        sim.set_forward_speed(3.0 * 0.5144);
+        let start = sim.boat_pose().0;
+        run(&mut sim, &Env::CALM, 20.0);
+        let dist = (sim.boat_pose().0 - start).length();
+        let (v, _) = sim.boat_vel();
+        assert!(dist < 35.0, "test setup should stay clear of the basin wall, got {dist} m");
+        assert!(
+            v.length() > 2.0 * 0.5144,
+            "expected to still be well above 1 kn after 20s/{dist}m (old model would already be \
+             at ~1 kn by 17m), got {} kt",
+            v.length() / 0.5144
+        );
+    }
+
+    #[test]
     fn same_input_sequence_is_bit_identical() {
         // Fresh sim + same input stream (env AND helm/engine) => bit-exact
         // trajectory. This is the property future replays/verification will
@@ -836,15 +990,23 @@ mod tests {
 
     #[test]
     fn current_carries_the_boat_along() {
-        // An easterly-setting current carries the moored boat east and, at
-        // 0.8 m/s over 30 s of open water, well along the quay.
+        // An easterly-setting current carries the moored boat east — but
+        // slowly picking up way from a dead stop, not snapping to current
+        // speed. Same physics, same direction of surprise, as the coasting
+        // fix: the ITTC friction FORCE is genuinely weak at low RELATIVE
+        // speed (the u² factor, not Cf, which slowly rises as Re falls),
+        // and the default 8.5 t hull has a lot of inertia for a gentle
+        // 0.8 m/s (1.6 kn) current to work against.
+        // 60 s only gets it to ~36% of current speed and ~10 m of drift —
+        // real, not a bug (this replaces a 30 s/5 m threshold that was
+        // calibrated to the old, too-strong bluff-body drag).
         let mut sim = Sim::new();
         let start = sim.boat_pose().0;
         let env = Env { current_to_deg: 90.0, current_speed: 0.8, ..Env::CALM };
-        run(&mut sim, &env, 30.0);
+        run(&mut sim, &env, 60.0);
         let pos = sim.boat_pose().0;
         assert!(
-            pos.x > start.x + 5.0,
+            pos.x > start.x + 8.0,
             "expected a clear eastward drift, got dx = {}",
             pos.x - start.x
         );
@@ -950,34 +1112,38 @@ mod tests {
 
     #[test]
     fn full_throttle_equilibrium_speed_is_bracketed() {
-        // The thrust curve intersects the surge drag somewhere around
-        // 3.2 m/s (the constants' equilibrium math). The basin is too small
-        // for a long straight run to settle there, so bracket instead:
-        // released below the equilibrium the boat must still be gaining,
-        // released above it it must be losing.
+        // The thrust curve intersects the ITTC surge drag somewhere around
+        // 4.85 m/s at the default profile (see the gotcha on
+        // T_BOLLARD_AHEAD — this is now above the classic hull-speed limit,
+        // a known open gap pending a wave-making resistance term, not
+        // something to paper over here). The basin is too small for a long
+        // straight run to settle there, so bracket instead: released below
+        // the equilibrium the boat must still be gaining, released above it
+        // it must be losing.
         let below = {
             let mut sim = Sim::new();
-            sim.set_forward_speed(2.5);
+            sim.set_forward_speed(4.0);
             run_input(&mut sim, &Env::CALM, &FULL_AHEAD, 3.0);
             let (v, _) = sim.boat_vel();
             v.length()
         };
-        assert!(below > 2.5, "expected to accelerate from 2.5 m/s at full ahead, got {below}");
+        assert!(below > 4.0, "expected to accelerate from 4.0 m/s at full ahead, got {below}");
         let above = {
             let mut sim = Sim::new();
-            sim.set_forward_speed(3.6);
+            sim.set_forward_speed(5.5);
             run_input(&mut sim, &Env::CALM, &FULL_AHEAD, 3.0);
             let (v, _) = sim.boat_vel();
             v.length()
         };
-        assert!(above < 3.6, "expected to slow from 3.6 m/s at full ahead, got {above}");
+        assert!(above < 5.5, "expected to slow from 5.5 m/s at full ahead, got {above}");
     }
 
     #[test]
     fn astern_is_weaker_than_ahead() {
-        // A prop pitched for ahead delivers less astern (ASTERN_RATIO), and
-        // the transom-first drag is blunter than the bow-first drag — both
-        // say the same thing: the boat backs slower than it motors ahead.
+        // A prop pitched for ahead delivers less astern (ASTERN_RATIO) —
+        // axial drag itself is symmetric now (ITTC skin friction depends on
+        // wetted area and speed, not which end leads), so this test is
+        // purely about the thrust asymmetry.
         let mut ahead = Sim::new();
         run_input(&mut ahead, &Env::CALM, &FULL_AHEAD, 8.0);
         let ahead_speed = ahead.boat_vel().0.length();
