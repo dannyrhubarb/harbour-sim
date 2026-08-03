@@ -51,6 +51,72 @@
     #loading h1 { font-size: 28px; letter-spacing: 0.3em; font-weight: 600; }
     #loading .sub { color: var(--dim); font-size: 13px; }
 
+    /* About: a small ⓘ button (bottom-LEFT corner, aligned with the
+       in-canvas help text, which the game indents past it — see main.rs)
+       opening an HTML overlay. HTML because the build info carries real
+       links (commit / PR), which the canvas can't do. Flex centering, not
+       line-height — the mono font's baseline metrics sat the glyph
+       visibly off-centre. */
+    #about-btn {
+      position: fixed;
+      left: calc(10px + env(safe-area-inset-left, 0px));
+      bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+      width: 30px;
+      height: 30px;
+      padding: 0; /* native button reset */
+      border: 2px solid var(--dim);
+      border-radius: 50%;
+      background: rgba(10, 20, 30, 0.67);
+      color: var(--dim);
+      font: italic bold 16px var(--mono);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      z-index: 10;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    #about {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(4, 10, 16, 0.78);
+      z-index: 25;
+      font-family: var(--mono);
+    }
+    #about.on { display: flex; }
+    .about-card {
+      background: #0c2233;
+      border: 1px solid var(--dim);
+      border-radius: 8px;
+      padding: 22px 26px;
+      max-width: min(420px, calc(100vw - 40px));
+      color: var(--text);
+    }
+    .about-card h2 { font-size: 18px; letter-spacing: 0.25em; margin-bottom: 16px; }
+    .about-row { margin-bottom: 12px; }
+    .about-label { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; }
+    .about-value { font-size: 14px; word-break: break-all; }
+    .about-card a { color: #7fd4ff; }
+    #about-close {
+      display: block;
+      width: 100%;
+      margin-top: 18px;
+      padding: 8px 0;
+      text-align: center;
+      border: 1px solid var(--dim);
+      border-radius: 6px;
+      background: none; /* native button reset */
+      font: 14px var(--mono);
+      color: var(--text);
+      cursor: pointer;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
     /* Boot-guard error banner (script/wasm failures painted on screen). */
     #errbox {
       position: fixed;
@@ -107,11 +173,38 @@
     <div class="sub" id="rev-line"></div>
   </div>
 
+  <!-- About overlay (the Pegasus scr-about, sized to this repo): build
+       revision linked to its commit, build time, and — on a pr-<n>/
+       preview deployment — a link to the PR it previews. -->
+  <button type="button" id="about-btn" title="About" aria-label="About">i</button>
+  <div id="about">
+    <div class="about-card" role="dialog" aria-modal="true" aria-labelledby="about-title">
+      <h2 id="about-title">HARBOUR SIM</h2>
+      <div class="about-row">
+        <div class="about-label">Build revision</div>
+        <div class="about-value" id="about-rev">dev (local build)</div>
+      </div>
+      <div class="about-row">
+        <div class="about-label">Build time</div>
+        <div class="about-value" id="about-time">&mdash;</div>
+      </div>
+      <div class="about-row" id="about-pr-row" style="display:none">
+        <div class="about-label">Preview deployment</div>
+        <div class="about-value" id="about-pr"></div>
+      </div>
+      <div class="about-row">
+        <div class="about-label">Project</div>
+        <div class="about-value"><a href="https://github.com/harbour-sim/harbour-sim" target="_blank" rel="noopener">harbour-sim on GitHub</a></div>
+      </div>
+      <button type="button" id="about-close">Close</button>
+    </div>
+  </div>
+
   <script src="./mq_js_bundle.js"></script>
   <script>
     // Deploy-time injected revision (build-site sed). Local dev keeps the
     // placeholder — then no cache-buster is appended.
-    const wasmRev = "56b273c";
+    const wasmRev = "23f05ce";
     if (!wasmRev.startsWith("__")) {
       document.getElementById("rev-line").textContent = "build " + wasmRev;
     }
@@ -216,6 +309,151 @@
       if (e.relatedTarget === null) releaseAllMouseButtons();
     });
     window.addEventListener("blur", releaseAllMouseButtons);
+
+    // --- Timestamp formatting (ported from Pegasus fmtDateTime) ----------
+    // Formatted for the region derived from the device TIMEZONE — the one
+    // regional setting browsers actually expose. Language tags lie about
+    // region: a phone set to English in Sweden reports a bare en-US
+    // (verified in the field on Pegasus), but its Intl.DateTimeFormat()
+    // .resolvedOptions().timeZone is still Europe/Stockholm. Intl only
+    // maps region -> zones (Intl.Locale getTimeZones), so reverse-map by
+    // scanning the 676 candidate region codes for the one whose zone list
+    // contains ours (~200 ms: deferred off the boot path and memoized in
+    // localStorage). Formatting then follows the REGION'S OWN conventions
+    // — its dominant language via maximize() (und-SE -> sv-Latn-SE ->
+    // "2026-07-11 16:00"), NOT the UI language glued onto the region
+    // (en-SE inserts a comma that is not the standard Swedish format).
+    // These timestamps are purely numeric, so no words from that language
+    // ever surface; -u-nu-latn pins Latin digits for regions whose default
+    // numerals aren't. Regionless zones (UTC, Etc/*), missing APIs (old
+    // Safari), or a not-yet-finished scan fall back to a fixed ISO local
+    // format.
+    let DATE_LOCALE = null;
+    (function initDateLocale() {
+      let zone = "";
+      try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { return; }
+      if (!zone) return;
+      try {
+        const c = JSON.parse(localStorage.getItem("harbour_sim_date_locale") || "null");
+        // v2: region-dominant-language formatting (the Pegasus cache shape)
+        if (c && c.v === 2 && c.zone === zone) { DATE_LOCALE = c.locale; return; }
+      } catch (e) { /* recompute below */ }
+      setTimeout(() => {
+        let locale = null;
+        for (let i = 0; i < 26 && !locale; i++) {
+          for (let j = 0; j < 26; j++) {
+            const region = String.fromCharCode(65 + i) + String.fromCharCode(65 + j);
+            let zones;
+            try {
+              const l = new Intl.Locale("und-" + region);
+              zones = l.getTimeZones ? l.getTimeZones() : l.timeZones;
+            } catch (e) { continue; }
+            if (zones && zones.includes(zone)) {
+              try { locale = new Intl.Locale("und-" + region).maximize().toString() + "-u-nu-latn"; }
+              catch (e) { locale = "en-" + region; }
+              break;
+            }
+          }
+        }
+        DATE_LOCALE = locale;
+        try {
+          localStorage.setItem("harbour_sim_date_locale", JSON.stringify({ v: 2, zone, locale }));
+        } catch (e) { /* quota — recompute next load */ }
+      }, 0);
+    })();
+    function fmtDateTime(ts) {
+      const d = new Date(ts);
+      if (DATE_LOCALE) {
+        try { return d.toLocaleString(DATE_LOCALE, { dateStyle: "short", timeStyle: "short" }); }
+        catch (e) { /* engine rejects the constructed tag — fall through */ }
+      }
+      const p = n => String(n).padStart(2, "0");
+      return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate())
+        + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+    }
+
+    // --- About overlay ---------------------------------------------------
+    // Build info from the deploy-time seds (build-site): 23f05ce
+    // (already in wasmRev above) is `<short-sha>` on main and
+    // `<short-sha>-pr-<n>` on a preview deploy; 2026-08-03T11:57:01Z is ISO-8601
+    // UTC, re-rendered via fmtDateTime above. Local dev keeps both
+    // placeholders and shows the "dev (local build)" defaults.
+    (function () {
+      const repoUrl = "https://github.com/harbour-sim/harbour-sim";
+      const buildTime = "2026-08-03T11:57:01Z";
+      const aboutEl = document.getElementById("about");
+      const revEl = document.getElementById("about-rev");
+      const link = (href, label) => {
+        const a = document.createElement("a");
+        a.href = href;
+        a.target = "_blank";
+        a.rel = "noopener";
+        a.textContent = label;
+        return a;
+      };
+      let revMatch = null;
+      if (!wasmRev.startsWith("__")) {
+        revMatch = wasmRev.match(/^([0-9a-f]{7,40})(?:-pr-(\d+))?$/i);
+        revEl.textContent = "";
+        if (revMatch) {
+          revEl.appendChild(link(repoUrl + "/commit/" + revMatch[1], wasmRev));
+        } else {
+          revEl.textContent = wasmRev;
+        }
+      }
+      // Rendered on every OPEN, not at boot (the Pegasus renderBuildTime
+      // pattern): the region scan above is deferred and may not have
+      // finished by the time the page loads.
+      function renderBuildTime() {
+        if (buildTime.startsWith("__")) return; // local dev — keep the dash
+        const t = Date.parse(buildTime);
+        document.getElementById("about-time").textContent =
+          isNaN(t) ? buildTime : fmtDateTime(t);
+      }
+      // PR number: primarily the revision's -pr-<n> suffix; the pr-<n>/
+      // path is the fallback (e.g. if the label format ever changes).
+      const prNum = (revMatch && revMatch[2]) ||
+        (location.pathname.match(/\/pr-(\d+)\//) || [])[1];
+      if (prNum) {
+        document.getElementById("about-pr").appendChild(
+          link(repoUrl + "/pull/" + prNum, "PR #" + prNum));
+        document.getElementById("about-pr-row").style.display = "";
+      }
+      // Dialog focus management: open focuses the Close button, close
+      // restores focus to the ⓘ button. Note the game's keyboard input
+      // needs CANVAS focus either way (miniquad wires onkeydown to the
+      // canvas element) — that's the page-load state too, so restoring to
+      // the button follows the dialog convention without regressing keys.
+      const btn = document.getElementById("about-btn");
+      const closeBtn = document.getElementById("about-close");
+      function openAbout() {
+        renderBuildTime();
+        aboutEl.classList.add("on");
+        closeBtn.focus();
+      }
+      function closeAbout() {
+        if (!aboutEl.classList.contains("on")) return;
+        aboutEl.classList.remove("on");
+        btn.focus();
+      }
+      btn.addEventListener("click", openAbout);
+      closeBtn.addEventListener("click", closeAbout);
+      // Tap the dimmed backdrop (not the card) to dismiss; Esc too.
+      aboutEl.addEventListener("click", (e) => {
+        if (e.target === aboutEl) closeAbout();
+      });
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") closeAbout();
+      });
+      // Swallow press events so a tap on the button/overlay can never
+      // double as a canvas press (the Pegasus menu rule) — stopPropagation
+      // only, no preventDefault (that would kill the click).
+      for (const el of [btn, aboutEl]) {
+        for (const t of ["mousedown", "touchstart", "pointerdown"]) {
+          el.addEventListener(t, (e) => e.stopPropagation());
+        }
+      }
+    })();
   </script>
 </body>
 </html>
