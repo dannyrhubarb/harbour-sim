@@ -6,6 +6,8 @@ manoeuvres — placing ropes (springs, breast lines, bow/stern lines) to make
 the boat move the way you want under different conditions. Right now it's a
 proof of concept: fixed quay, adjustable wind and current, no ropes yet.
 
+**▶ Play it at <https://harbour-sim.github.io/harbour-sim/>**
+
 Built on the same stack as [Pegasus](https://github.com/dannyrhubarb/pegasus):
 Rust + macroquad + Rapier 2D, compiled to WebAssembly and served via GitHub
 Pages.
