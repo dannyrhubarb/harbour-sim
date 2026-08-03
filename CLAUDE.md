@@ -354,8 +354,13 @@ like Pegasus.
   canvas's `getBoundingClientRect().bottom` against
   `visualViewport.offsetTop + height`, NOT `window.innerHeight` — on iOS
   `innerHeight` shrinks with the visible area, so the difference reads 0.
-- Cosmetic-only nondeterminism is allowed render-side (the water ripples use
-  `get_time()`); nothing cosmetic may feed back into the sim.
+- Cosmetic-only nondeterminism is allowed render-side (the water ripples
+  and the prop-wash foam streaks use `get_time()`); nothing cosmetic may
+  feed back into the sim. The wash streaks READ sim state (`sim.engine()`,
+  so they fade with the spool lag) and follow the deflected blade ahead /
+  boil forward along the quarters astern; the rudder blade itself is drawn
+  BEFORE the hull fill (root under the counter), swinging by the same
+  blade-angle formula sim-core uses.
 - Controls: touch/mouse = drag the dials/sliders + RESET/KEEL buttons;
   keyboard = **the boat has the primary keys** (agreed 2026-08-03: driving
   is the main activity): W/S throttle up/down, A/D helm port/starboard

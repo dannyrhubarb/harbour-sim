@@ -539,6 +539,49 @@ async fn main() {
         let bl = |lx: f32, ly: f32| -> Vec2 { w2s(pos + vec2(lx * c - ly * s, lx * s + ly * c)) };
         let hull_fill = Color::from_rgba(230, 226, 212, 255);
         let hull_line = Color::from_rgba(40, 42, 48, 255);
+
+        // Blade angle for the rudder visual and the wash direction (same
+        // formula as sim-core: positive = trailing edge to port).
+        let blade = -input.rudder * 35f32.to_radians();
+
+        // Cosmetic prop wash: foam streaks driven by the SPOOLED engine
+        // (sim.engine(), so they fade in/out with the lag, not the lever).
+        // Render-only — reads sim state, feeds nothing back (get_time is
+        // allowed here like the ripples). Ahead the slipstream leaves the
+        // stern along the deflected blade; astern it boils forward along
+        // both quarters — the two directions you'd see from a quay.
+        let engine = sim.engine();
+        if engine.abs() > 0.05 {
+            for i in 0u32..8 {
+                let h = i.wrapping_mul(2654435761);
+                let fy = ((h & 0xffff) as f32 / 65535.0) - 0.5;
+                let phase = ((h >> 16) & 0xffff) as f32 / 65535.0;
+                let ph = (t * 1.8 + phase).fract();
+                let alpha = engine.abs().min(1.0) * (1.0 - ph) * 0.5;
+                let foam = Color::new(0.75, 0.88, 0.92, alpha);
+                let (a, b) = if engine > 0.0 {
+                    let dir = vec2(-blade.cos(), blade.sin());
+                    let start = vec2(-6.0, fy * 1.1);
+                    let p = start + dir * (ph * (1.5 + 2.2 * engine));
+                    (bl(p.x, p.y), bl(p.x + dir.x * 0.7, p.y + dir.y * 0.7))
+                } else {
+                    let side_y = if i % 2 == 0 { 1.0 } else { -1.0 };
+                    let start = vec2(-5.2, side_y * (1.4 + 0.6 * fy.abs()));
+                    let p = start + vec2(ph * (2.0 - 2.5 * engine), 0.0);
+                    (bl(p.x, p.y), bl(p.x + 0.6, p.y))
+                };
+                draw_line(a.x, a.y, b.x, b.y, (0.14 * scale).max(1.0), foam);
+            }
+        }
+
+        // Rudder blade: stock just inside the transom, drawn BEFORE the
+        // hull fill so the root reads as under the counter and only the
+        // swung part shows past the transom.
+        let te = vec2(-5.85 - 0.55 * blade.cos(), 0.55 * blade.sin());
+        let rp = bl(-5.85, 0.0);
+        let tep = bl(te.x, te.y);
+        draw_line(rp.x, rp.y, tep.x, tep.y, (0.16 * scale).max(1.5), hull_line);
+
         let p0 = bl(HULL_PTS[0].0, HULL_PTS[0].1);
         for i in 1..HULL_PTS.len() - 1 {
             let p1 = bl(HULL_PTS[i].0, HULL_PTS[i].1);
