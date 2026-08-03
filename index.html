@@ -111,7 +111,7 @@
   <script>
     // Deploy-time injected revision (build-site sed). Local dev keeps the
     // placeholder — then no cache-buster is appended.
-    const wasmRev = "fab278d";
+    const wasmRev = "d4c2c83";
     if (!wasmRev.startsWith("__")) {
       document.getElementById("rev-line").textContent = "build " + wasmRev;
     }
@@ -167,6 +167,55 @@
       window.visualViewport.addEventListener("resize", pushSafeArea);
       window.visualViewport.addEventListener("scroll", pushSafeArea);
     }
+
+    // Stuck-drag fix — see CLAUDE.md. The vendored bundle wires mouseup to
+    // the canvas only, so a release that happens after the pointer has left
+    // the browser window never reaches miniquad: its button-down state
+    // sticks forever and a drag claim (e.g. a HUD dial) stays "grabbed" on
+    // return. Primary fix: Pointer Capture — once set on pointerdown, the
+    // browser is spec-required to keep delivering pointerup/pointermove to
+    // `canvas` even while the pointer is outside the window (verified in
+    // headless Chromium: pointerup fires with real, negative, off-viewport
+    // coordinates once captured). Filtered to pointerType "mouse" so touch
+    // gestures — handled entirely separately, see Frontend conventions —
+    // are untouched. `canvas`/`dpi_scale` are globals from mq_js_bundle.js.
+    function releaseAllMouseButtonsAt(clientX, clientY) {
+      if (typeof wasm_exports === "undefined" || !wasm_exports || !wasm_exports.mouse_up) return;
+      const rect = canvas.getBoundingClientRect();
+      const scale = dpi_scale();
+      const x = (clientX - rect.left) * scale;
+      const y = (clientY - rect.top) * scale;
+      for (const button of [0, 1, 2]) wasm_exports.mouse_up(x, y, button);
+    }
+    canvas.addEventListener("pointerdown", (e) => {
+      // Feature-detected + try/caught: a browser without Pointer Capture
+      // (or one that rejects capture on this pointer) must fall through to
+      // the mouseout/blur fallback below, not throw on every click.
+      if (e.pointerType === "mouse" && canvas.setPointerCapture) {
+        try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* fallback handles it */ }
+      }
+    });
+    canvas.addEventListener("pointerup", (e) => {
+      if (e.pointerType === "mouse") releaseAllMouseButtonsAt(e.clientX, e.clientY);
+    });
+    canvas.addEventListener("pointercancel", (e) => {
+      if (e.pointerType === "mouse") releaseAllMouseButtonsAt(e.clientX, e.clientY);
+    });
+    // Fallback for browsers without Pointer Capture support: `mouseout` on
+    // `document` with a null `relatedTarget` is the standard cross-browser
+    // signal for "the pointer left the window" (NOT `mouseleave`, which
+    // doesn't reliably fire for a real window-exit). Plus window blur, for
+    // focus lost without a viewport-boundary crossing (e.g. alt-tab).
+    let lastClientX = 0, lastClientY = 0;
+    window.addEventListener("mousemove", (e) => {
+      lastClientX = e.clientX;
+      lastClientY = e.clientY;
+    });
+    const releaseAllMouseButtons = () => releaseAllMouseButtonsAt(lastClientX, lastClientY);
+    document.addEventListener("mouseout", (e) => {
+      if (e.relatedTarget === null) releaseAllMouseButtons();
+    });
+    window.addEventListener("blur", releaseAllMouseButtons);
   </script>
 </body>
 </html>
