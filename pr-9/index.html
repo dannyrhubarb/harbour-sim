@@ -14,7 +14,15 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { overflow: hidden; background: #091a26; }
+    /* dvh/dvw track iOS Safari's collapsing toolbars; 100vh is the
+       toolbar-collapsed (largest) viewport, and on a page that never
+       scrolls the toolbar never collapses — so a 100vh canvas keeps its
+       bottom edge permanently behind the address bar. Plain vh/vw first
+       as the fallback for browsers without dynamic viewport units. */
     canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+    @supports (height: 100dvh) {
+      canvas { width: 100dvw; height: 100dvh; }
+    }
 
     :root {
       --text: #cde3f0;
@@ -103,7 +111,7 @@
   <script>
     // Deploy-time injected revision (build-site sed). Local dev keeps the
     // placeholder — then no cache-buster is appended.
-    const wasmRev = "f064515-pr-9";
+    const wasmRev = "e485ae0-pr-9";
     if (!wasmRev.startsWith("__")) {
       document.getElementById("rev-line").textContent = "build " + wasmRev;
     }
@@ -131,6 +139,8 @@
       "top:env(safe-area-inset-top);left:env(safe-area-inset-left);" +
       "right:env(safe-area-inset-right);bottom:env(safe-area-inset-bottom);";
     document.body.appendChild(saProbe);
+    // Distinct name: the bundle already declares a top-level `canvas` global.
+    const saCanvas = document.getElementById("glcanvas");
     function pushSafeArea() {
       try {
         if (typeof wasm_exports === "undefined" || !wasm_exports || !wasm_exports.set_safe_area) return;
@@ -139,8 +149,14 @@
         let bottom = px(cs.bottom);
         const vv = window.visualViewport;
         if (vv) {
-          // The canvas is 100vh and extends under a floating toolbar.
-          bottom = Math.max(bottom, window.innerHeight - vv.height - vv.offsetTop);
+          // Any part of the canvas below the visual viewport is behind a
+          // browser toolbar (a 100vh canvas without dvh support, or mid
+          // toolbar animation). Measure the canvas's own bottom edge —
+          // window.innerHeight is useless here: on iOS it shrinks together
+          // with the visible area, so the difference always reads 0.
+          const visibleBottom = vv.offsetTop + vv.height;
+          const canvasBottom = saCanvas.getBoundingClientRect().bottom;
+          bottom = Math.max(bottom, canvasBottom - visibleBottom);
         }
         wasm_exports.set_safe_area(px(cs.top), px(cs.left), bottom, px(cs.right));
       } catch (e) { /* never fatal */ }
@@ -172,7 +188,12 @@
       for (const button of [0, 1, 2]) wasm_exports.mouse_up(x, y, button);
     }
     canvas.addEventListener("pointerdown", (e) => {
-      if (e.pointerType === "mouse") canvas.setPointerCapture(e.pointerId);
+      // Feature-detected + try/caught: a browser without Pointer Capture
+      // (or one that rejects capture on this pointer) must fall through to
+      // the mouseout/blur fallback below, not throw on every click.
+      if (e.pointerType === "mouse" && canvas.setPointerCapture) {
+        try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* fallback handles it */ }
+      }
     });
     canvas.addEventListener("pointerup", (e) => {
       if (e.pointerType === "mouse") releaseAllMouseButtonsAt(e.clientX, e.clientY);
