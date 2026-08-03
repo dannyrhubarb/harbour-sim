@@ -254,6 +254,24 @@ like Pegasus.
   reliably less than the aft-biased default — the keel's own
   `swept_moment` stacking on top of the shared rudder baseline, not a
   separate zero/nonzero split like before.
+  **Composition (`rudder_force`, added alongside `rudder_lift_drag`)**: the
+  boat physics (`tick`) computes the actual local inflow at the blade
+  (surge/sway/yaw-sweep — it's the only side that knows the boat's motion)
+  and hands it to `rudder_force(flow, delta)` as a plain vector in the same
+  (fwd, side) frame; that function is a pure foil model — chord vs. flow
+  angle in, lift+drag force in that SAME local frame out — with no idea
+  it's attached to a boat at all. `tick` then rotates the returned force by
+  `fwd`/`side` into world space to apply it at the blade's world position.
+  Splitting it this way makes the foil directly unit-testable without a
+  `Sim`: `rudder_aligned_with_flow_has_no_effect` (a chord parallel to the
+  inflow, however that alignment arose, produces zero lift and only
+  baseline drag) and
+  `following_helm_stays_attached_but_opposing_helm_stalls_while_spinning`
+  (spinning clockwise, helm INTO the turn re-attaches the flow even at full
+  deflection because the sweep and the deflection rotate the chord-to-flow
+  angle the same way; helm OPPOSING the spin stalls from just a few degrees
+  because they fight each other) both call `rudder_force` directly instead
+  of running a transient `Sim`.
   **Gotcha (2026-08-03, verify physics fixes against the benchmark that
   motivated them, don't assume)**: this fix does NOT, by itself, reproduce
   a tight prop-walk-free backing turn (real small-boat mooring-class

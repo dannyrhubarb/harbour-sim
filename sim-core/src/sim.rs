@@ -282,6 +282,28 @@ fn rudder_lift_drag(alpha: f32) -> (f32, f32) {
     (cl.copysign(a), cd)
 }
 
+/// The rudder foil's force response to a given inflow, in the SAME local
+/// (fwd, side) frame the inflow itself is expressed in — a pure function of
+/// physics, knowing nothing about the boat's world position or heading.
+/// Composition on purpose: `tick` computes the actual flow the blade sees
+/// (surge, sway, and the yaw sweep at the blade's station — the boat
+/// physics' job), hands it here as a plain vector alongside the blade
+/// angle, and this function returns the resulting force in that same local
+/// frame; `tick` then rotates that local force into world space by `fwd`/
+/// `side` to apply it at the blade's world position. Neither side needs to
+/// know how the other is implemented.
+fn rudder_force(flow: Vec2, delta: f32) -> Vec2 {
+    if flow.length_squared() <= 1e-6 {
+        return Vec2::ZERO;
+    }
+    let fhat = flow / flow.length();
+    let chord = Vec2::new(-delta.cos(), delta.sin()); // stock → trailing edge
+    let alpha = chord.perp_dot(fhat).atan2(chord.dot(fhat));
+    let (cl, cd) = rudder_lift_drag(alpha);
+    let q = 0.5 * RHO_WATER * RUDDER_AREA * flow.length_squared();
+    Vec2::new(-fhat.y, fhat.x) * (q * cl) + fhat * (q * cd)
+}
+
 // ---------------------------------------------------------------------------
 // Environment
 // ---------------------------------------------------------------------------
@@ -640,16 +662,15 @@ impl Sim {
         // as stale or as fresh as its actual angle to the actual flow.
         let flow = Vec2::new(-surge, -(sway + w * RUDDER_X));
         let rud_pt = pos + fwd * RUDDER_X;
-        if flow.length_squared() > 1e-6 {
-            let fhat = flow / flow.length();
-            let chord = Vec2::new(-delta.cos(), delta.sin()); // stock → trailing edge
-            let alpha = chord.perp_dot(fhat).atan2(chord.dot(fhat));
-            let (cl, cd) = rudder_lift_drag(alpha);
-            let q = 0.5 * RHO_WATER * RUDDER_AREA * flow.length_squared();
-            let f_local = Vec2::new(-fhat.y, fhat.x) * (q * cl) + fhat * (q * cd);
-            let f_rudder = fwd * f_local.x + side * f_local.y;
-            rb.add_force_at_point(vector![f_rudder.x, f_rudder.y], point![rud_pt.x, rud_pt.y], true);
-        }
+        // rudder_force is a PURE function of the inflow and the blade angle,
+        // in the same local (fwd, side) frame `flow` is already expressed
+        // in — it knows nothing about world position/orientation. `tick`
+        // owns computing that inflow (surge/sway/yaw-sweep, above) and
+        // converting the returned local force into world space to apply it
+        // at the right point, below.
+        let f_local = rudder_force(flow, delta);
+        let f_rudder = fwd * f_local.x + side * f_local.y;
+        rb.add_force_at_point(vector![f_rudder.x, f_rudder.y], point![rud_pt.x, rud_pt.y], true);
         // Prop wash over the blade: motoring ahead the prop's slipstream
         // hits the deflected rudder, which turns it sideways — the reaction
         // is K_WASH·T·sin δ of side force at the stern, there the instant
@@ -1053,6 +1074,73 @@ mod tests {
             moderate > hard_over,
             "a stalled hard-over should bite more weakly at first: \
              moderate {moderate} vs hard-over {hard_over} rad/s"
+        );
+    }
+
+    #[test]
+    fn rudder_aligned_with_flow_has_no_effect() {
+        // rudder_force takes the ACTUAL inflow (which a spin can dominate
+        // even with the helm centered — see the module doc comment on
+        // rudder_lift_drag) and the blade angle; whenever the chord ends up
+        // parallel to that inflow, regardless of why, the blade should
+        // produce no lift and only the baseline parasitic drag. Flow along
+        // +x (pure "surge"), chord angle 0 (helm centered) is the simplest
+        // such case.
+        let f = rudder_force(Vec2::new(2.5, 0.0), 0.0);
+        assert!(f.y.abs() < 1e-3, "aligned blade should produce no side force, got {f:?}");
+        // Drag pushes the blade WITH the relative flow (a passive object
+        // gets carried along by the fluid moving past it), so a small
+        // positive (flow-aligned) force remains — just the baseline
+        // parasitic CD0, not zero.
+        assert!(f.x > 0.0, "aligned blade should still drag along the flow, got {f:?}");
+
+        // Sanity check that the zero above is really about ALIGNMENT, not
+        // just "this function returns small numbers": a blade broadside to
+        // a flow of the same magnitude (delta=0, but the flow itself is
+        // purely lateral this time, e.g. a strong yaw sweep with no surge)
+        // must produce a far bigger force, not another near-zero.
+        let f_broadside = rudder_force(Vec2::new(0.0, 2.5), 0.0);
+        assert!(
+            f_broadside.length() > f.length() * 5.0,
+            "a blade broadside to the flow should push much harder than one \
+             aligned with it, got {f_broadside:?} vs {f:?}"
+        );
+    }
+
+    #[test]
+    fn following_helm_stays_attached_but_opposing_helm_stalls_while_spinning() {
+        // A boat making way and ALREADY spinning clockwise (negative yaw
+        // rate, per the sign convention used throughout this file): the
+        // yaw sweep at the rudder biases the effective flow the same way a
+        // starboard helm biases the chord, so committing FURTHER into the
+        // turn (starboard, following the spin) rotates the effective angle
+        // of attack back toward alignment even at full deflection, while
+        // trying to check the spin (port, opposing it) pushes the angle
+        // deeper into stall from the first few degrees of helm. Neither
+        // side asserts the sign by hand-derivation — both are read off
+        // rudder_lift_drag's own stall threshold, the same one `tick` uses.
+        let surge = 2.0;
+        let w = -0.3; // spinning clockwise
+        let flow = Vec2::new(-surge, -w * RUDDER_X);
+
+        let alpha_mag = |rudder_cmd: f32| {
+            let delta = -rudder_cmd * RUDDER_MAX_DEG.to_radians();
+            let fhat = flow / flow.length();
+            let chord = Vec2::new(-delta.cos(), delta.sin());
+            chord.perp_dot(fhat).atan2(chord.dot(fhat)).abs()
+        };
+        let stall_on = 0.30_f32; // RUDDER_STALL_ON, kept in sync by the assertions below
+        let port_10pct = alpha_mag(-0.1);
+        let stbd_100pct = alpha_mag(1.0);
+        assert!(
+            port_10pct > stall_on,
+            "a mere 10% of opposing (port) helm should already be stalled while \
+             spinning this hard, got {port_10pct} rad"
+        );
+        assert!(
+            stbd_100pct < stall_on,
+            "full following (starboard) helm should re-attach the flow while \
+             spinning this hard, got {stbd_100pct} rad"
         );
     }
 
