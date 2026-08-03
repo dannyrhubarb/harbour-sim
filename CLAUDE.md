@@ -395,15 +395,15 @@ like Pegasus.
     of the 3→1 kn distance (~99 m, matching the ~100 m benchmark closely)
     was done by integrating the real `tick()` formula offline, not inside
     `Sim`).
-  - **Consequence, not patched**: fixing the low-speed regime correctly
-    EXPOSED that the model has no wave-making resistance term — full-throttle
-    equilibrium is now ~4.85 m/s (9.4 kn), above this hull's classic
+  - **What fixing this correctly EXPOSED**: full-throttle equilibrium
+    initially came out to ~4.85 m/s (9.4 kn) — above this hull's classic
     displacement hull speed (~8.4 kn), not achievable on 28 hp in reality.
-    The old bluff-body coefficient was accidentally capping top speed at a
-    plausible number while being wrong at low speed; the honest fix is a
-    real, Froude-number-shaped wave-making term, left open rather than
-    papered over by re-inflating the friction coefficient (see the gotcha
-    on `T_BOLLARD_AHEAD`). Two lessons in one: a coefficient tuned to look
+    The old bluff-body coefficient had been accidentally capping top speed
+    at a plausible number while being wrong at low speed; fixing the low
+    speed regime honestly uncovered that the sim had no wave-making
+    resistance term at all to do that job for real. Fixed by adding one —
+    see the next bullet — rather than papering over it by re-inflating the
+    friction coefficient. Two lessons in one: a coefficient tuned to look
     right at one speed can be very wrong at another, and fixing one regime
     honestly can uncover what was quietly covering for a missing one.
   - Also surfaced the same "was calibrated to the old, too-strong drag"
@@ -413,6 +413,41 @@ like Pegasus.
     weak-friction-at-low-relative-speed physics, so it's now also
     correctly slower, and its threshold/duration were updated to match
     real behaviour instead of the old too-fast pickup.
+- **Wave-making resistance** (`wave_resistance_coefficient`, added right
+  after the ITTC friction fix to close the gap it exposed — see above): the
+  RIGHT tool is hull-form-specific (the Delft Systematic Yacht Hull Series,
+  DSYHS — Gerritsma/Onnink/Versluis 1981, refined since by Keuning et al. —
+  tank-tested residuary-resistance regressions against 22 yacht hull forms,
+  what real yacht VPPs use), but **not implemented**: it needs a coefficient
+  table that couldn't be verified from available sources (four fetch
+  attempts 403'd or came up empty) and hull-form inputs this sim doesn't
+  model yet (prismatic coefficient, LCB, midship coefficient, `BWL/Tc`) —
+  reciting a plausible-looking but unverified table would have been exactly
+  the kind of invented number this whole rewrite has been getting away
+  from. **What IS implemented is the right FUNCTION CLASS, generically
+  calibrated rather than hull-form-fitted**:
+  `Cw(Fn) = C_WAVE_SCALE · exp(-C_WAVE_K / Fn²)` — the classical thin-ship
+  (Michell/Havelock) asymptotic result for wave resistance at low-to-
+  moderate Froude number: an essential singularity vanishing faster than
+  any power of Fn as Fn→0, then rising steeply approaching the hull-speed
+  hump. Theoretically correct SHAPE, independent of hull form (DSYHS would
+  sharpen the AMPLITUDE for this specific hull, not change the shape). The
+  two constants come from two widely-cited, GENERIC anchor points (not
+  fitted to this boat's own target behaviour): `Rw/Δ ~ 0.001` (negligible)
+  at `Fn=0.20`, `Rw/Δ ~ 0.12` (dominant) at `Fn=0.42` (~hull speed).
+  **Consistency check, not a target**: solving those two constants and
+  re-running the equilibrium lands full-throttle at 6.3 kn — close to the
+  ~6.2 kn this sim's engine sizing always assumed (`T_BOLLARD_AHEAD`'s
+  comment), without that number being an input anywhere in the derivation.
+  Verified the low-speed coasting benchmark stays undisturbed too (still
+  ~99 m, Cw is negligible at 1–3 kn / Fn~0.05–0.15) —
+  `wave_resistance_is_negligible_at_low_speed_and_dominant_near_hull_speed`
+  locks in both ends plus monotonicity. **Upgrade path, written down so it
+  isn't lost**: replace `Cw(Fn)` with the real DSYHS regression once its
+  coefficient table can be sourced and verified, deriving its hull-form
+  inputs from `HULL_PTS`/`KeelProfile` the same way `wetted_surface_area`
+  does now — sharpens the amplitude for this hull without changing the
+  function class.
 - **Sway/yaw hydrodynamics** (unaffected by the above — still quadratic +
   linear drag on velocity RELATIVE TO THE WATER, via the real ρ·Cd·A
   formulas): a uniform current is just "the water moves", so the same term
