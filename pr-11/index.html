@@ -51,14 +51,15 @@
     #loading h1 { font-size: 28px; letter-spacing: 0.3em; font-weight: 600; }
     #loading .sub { color: var(--dim); font-size: 13px; }
 
-    /* About: a small ⓘ button (bottom-centre — the only HUD-free spot:
-       dials top corners, SOG top-centre, KEEL/RESET bottom-right, help
-       bottom-left) opening an HTML overlay. HTML because the build info
-       carries real links (commit / PR), which the canvas can't do. */
+    /* About: a small ⓘ button (bottom-LEFT corner, aligned with the
+       in-canvas help text, which the game indents past it — see main.rs)
+       opening an HTML overlay. HTML because the build info carries real
+       links (commit / PR), which the canvas can't do. Flex centering, not
+       line-height — the mono font's baseline metrics sat the glyph
+       visibly off-centre. */
     #about-btn {
       position: fixed;
-      left: 50%;
-      transform: translateX(-50%);
+      left: calc(10px + env(safe-area-inset-left, 0px));
       bottom: calc(10px + env(safe-area-inset-bottom, 0px));
       width: 30px;
       height: 30px;
@@ -66,8 +67,10 @@
       border-radius: 50%;
       background: rgba(10, 20, 30, 0.67);
       color: var(--dim);
-      font: italic bold 16px/26px var(--mono);
-      text-align: center;
+      font: italic bold 16px var(--mono);
+      display: flex;
+      align-items: center;
+      justify-content: center;
       cursor: pointer;
       z-index: 10;
       -webkit-user-select: none;
@@ -192,7 +195,7 @@
   <script>
     // Deploy-time injected revision (build-site sed). Local dev keeps the
     // placeholder — then no cache-buster is appended.
-    const wasmRev = "fbaa3d5-pr-11";
+    const wasmRev = "987e46c-pr-11";
     if (!wasmRev.startsWith("__")) {
       document.getElementById("rev-line").textContent = "build " + wasmRev;
     }
@@ -299,14 +302,14 @@
     window.addEventListener("blur", releaseAllMouseButtons);
 
     // --- About overlay ---------------------------------------------------
-    // Build info from the deploy-time seds (build-site): fbaa3d5-pr-11
+    // Build info from the deploy-time seds (build-site): 987e46c-pr-11
     // (already in wasmRev above) is `<short-sha>` on main and
-    // `<short-sha>-pr-<n>` on a preview deploy; 2026-08-03T10:15:22Z is ISO-8601
+    // `<short-sha>-pr-<n>` on a preview deploy; 2026-08-03T10:32:38Z is ISO-8601
     // UTC, re-rendered in the viewer's locale. Local dev keeps both
     // placeholders and shows the "dev (local build)" defaults.
     (function () {
       const repoUrl = "https://github.com/harbour-sim/harbour-sim";
-      const buildTime = "2026-08-03T10:15:22Z";
+      const buildTime = "2026-08-03T10:32:38Z";
       const aboutEl = document.getElementById("about");
       const revEl = document.getElementById("about-rev");
       const link = (href, label) => {
