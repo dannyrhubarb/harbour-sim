@@ -567,11 +567,22 @@ async fn main() {
         if sw >= 700.0 {
             help.push("keys: arrows = wind, A/D+W/S = current, R = reset, K = keel editor");
         }
+        // On narrow screens the hint line runs under the KEEL/RESET buttons
+        // (they share the bottom edge) — lift the block above them then.
+        let help_w = help
+            .iter()
+            .map(|l| measure_text(l, None, (fs * 0.8) as u16, 1.0).width)
+            .fold(0.0, f32::max);
+        let help_base = if sa_l + margin + help_w > keel_rect.x - margin {
+            keel_rect.y - margin
+        } else {
+            sh - sa_b - margin
+        };
         for (i, line) in help.iter().enumerate() {
             draw_text(
                 line,
                 sa_l + margin,
-                sh - sa_b - margin - (help.len() - 1 - i) as f32 * fs,
+                help_base - (help.len() - 1 - i) as f32 * fs,
                 fs * 0.8,
                 dim,
             );
