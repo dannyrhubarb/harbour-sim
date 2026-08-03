@@ -14,7 +14,14 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { overflow: hidden; background: #091a26; }
-    canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+    /* dvh (not just vh) so the canvas shrinks to the actually-visible area
+       on mobile browsers whose toolbar doesn't report itself via
+       visualViewport (Firefox Android keeps its toolbar fixed to the
+       bottom without shrinking innerHeight/visualViewport, so the
+       pushSafeArea() heuristic below sees no toolbar at all and the
+       bottom HUD buttons ended up drawn behind it — see index.html
+       history). vh stays as the fallback for browsers without dvh. */
+    canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; touch-action: none; }
 
     :root {
       --text: #cde3f0;
@@ -103,7 +110,7 @@
   <script>
     // Deploy-time injected revision (build-site sed). Local dev keeps the
     // placeholder — then no cache-buster is appended.
-    const wasmRev = "45ea95d-pr-7";
+    const wasmRev = "e43e896-pr-7";
     if (!wasmRev.startsWith("__")) {
       document.getElementById("rev-line").textContent = "build " + wasmRev;
     }
