@@ -96,6 +96,25 @@ icons + revision injection; `.github/actions/sync-pages-branch` = commit into
   `wasm_exports`, `function load`, …) that share the page's global scope —
   redeclaring any of them in `index.html`'s inline script is a SyntaxError
   that silently kills the whole inline script. Pick distinct names.
+  **Gotcha (2026-08-03)**: `canvas.onmouseup` (and `onmousedown`/
+  `onmousemove`) is wired to the canvas element only, not `window`. Click a
+  draggable HUD control (e.g. a wind/current dial), drag the pointer outside
+  the *browser window*, and release there: no `mouseup` DOM event fires
+  anywhere, so miniquad's button-down state sticks `true` forever and
+  `is_mouse_button_down` never goes false — the drag claim in `main.rs`
+  stays "grabbed" even after the pointer returns. Fixed in `index.html` (not
+  here, to keep this file identical to upstream) with **Pointer Capture**:
+  `canvas.setPointerCapture()` on `pointerdown` (mouse pointers only — touch
+  is untouched, see Touch controls below) makes the browser keep delivering
+  `pointerup`/`pointermove` to `canvas` even while the pointer is outside the
+  window, so the real release still reaches us; that forwards a synthetic
+  `wasm_exports.mouse_up(x, y, button)` for all three buttons. Verified in
+  headless Chromium via Playwright (`pointerup` fired with real off-viewport
+  coordinates once captured) — **first tried `document`'s `mouseleave` as
+  the release signal and it does not fire on window-exit in any browser
+  tested**; a `mouseout`/`blur` fallback (the standard `relatedTarget ===
+  null` trick) is kept for browsers without Pointer Capture, but Pointer
+  Capture is the real fix — don't remove it and rely on the fallback alone.
 - `icon.svg` — source for the PNG icons rendered at deploy time
   (`rsvg-convert` in build-site).
 - `rust-toolchain.toml` — **pins the Rust toolchain (1.94.1)**. The first
