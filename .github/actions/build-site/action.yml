@@ -48,7 +48,11 @@ runs:
         cp mq_js_bundle.js site/
         # Shrink the wasm (~30% on top of the size-tuned release profile).
         wasm-opt -Oz -o site/harbour-sim.wasm target/wasm32-unknown-unknown/release/harbour-sim.wasm
-        # Inject the build's git revision (cache-buster + on-screen label).
+        # Inject the build's git revision (cache-buster + on-screen label)
+        # and timestamp for the About overlay. ISO-8601 UTC: index.html
+        # re-renders it in the viewer's locale (same as Pegasus).
+        BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
         sed -i "s|__GIT_REVISION__|${GIT_REV}|g" site/index.html
+        sed -i "s|__BUILD_TIME__|${BUILD_TIME}|g" site/index.html
         # Version marker for a future stale-cache check (cheap to keep).
         printf '{"revision":"%s"}\n' "${GIT_REV}" > site/version.json

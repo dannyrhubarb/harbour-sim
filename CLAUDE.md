@@ -95,7 +95,33 @@ icons + revision injection; `.github/actions/sync-pages-branch` = commit into
   sim-core, never reaches into physics directly.
 - `index.html` — web wrapper: boot guard (standalone script ahead of the
   bundle that paints script errors on screen), loading overlay,
-  `__GIT_REVISION__` placeholder (deploy-time sed → wasm `?v=` cache-buster).
+  `__GIT_REVISION__` placeholder (deploy-time sed → wasm `?v=` cache-buster),
+  and the **About overlay** (2026-08-03, the Pegasus scr-about sized to this
+  repo): a small ⓘ button — bottom-LEFT corner; the in-canvas help text
+  indents 40 css px past it (`help_x` in main.rs — harmless dead space in
+  native builds, which have no HTML layer) — that
+  opens an HTML panel with the build revision **linked to its commit**, the
+  build time (`__BUILD_TIME__`, a second deploy-time sed in `build-site`,
+  ISO-8601 UTC re-rendered by `fmtDateTime` — the Pegasus timezone-derived
+  region-locale formatter, ported verbatim with the memo key renamed to
+  `harbour_sim_date_locale`; rendered on each overlay OPEN, not at boot,
+  because the ~200 ms region scan is deferred off the boot path) and, on
+  a preview
+  deployment, a **link to the PR** (number parsed from the revision label's
+  `-pr-<n>` suffix, `pr-<n>/` path as fallback), plus a static **link to
+  the project's GitHub page** (owner request, PR #11 review). HTML, not
+  in-canvas,
+  because the rows are real links. The ⓘ and Close controls are native
+  `<button>`s, the card carries `role="dialog"`/`aria-modal`/
+  `aria-labelledby`, and focus moves to Close on open / back to ⓘ on close
+  (CodeRabbit review, PR #11; the game's keys need CANVAS focus either way
+  — miniquad wires onkeydown to the canvas — so this matches the page-load
+  focus state). The button/overlay swallow
+  `mousedown`/`touchstart`/`pointerdown` (stopPropagation, no
+  preventDefault — the Pegasus menu rule) so a tap never doubles as a
+  canvas press; local dev keeps the placeholders and shows
+  "dev (local build)". The overlay does NOT pause the sim (there's no
+  pause export yet — the boat just keeps drifting behind it, harmless).
 - `mq_js_bundle.js` — **vendored** miniquad/quad-snd JS loader (same build as
   Pegasus). Pinned in-repo so deploys don't depend on a third-party host.
   **Gotcha**: it declares top-level globals (`const canvas`, `var gl`,
