@@ -55,10 +55,12 @@ pub const HULL_PTS: [(f32, f32); 8] = [
 ];
 
 /// 2D area density of the hull (kg/m²). Hull area is ~38 m² => ~7.5 t
-/// displacement, a small cruising sailboat under engine (harbour
-/// manoeuvres/docking — sails furled, no sail force modeled; wind is
-/// purely an external load on the hull/rig, same as it would be on any
-/// motorboat lying to it).
+/// displacement — sized for the current (and, for now, only) modeled ship
+/// type, a small cruising sailboat under engine (harbour manoeuvres/
+/// docking — sails furled, no sail force modeled; wind is purely an
+/// external load on the hull/rig, same as it would be on any motorboat
+/// lying to it). A second ship type would bring its own hull geometry,
+/// density, and windage constants alongside these, not in place of them.
 const HULL_DENSITY: f32 = 200.0;
 
 // Air / water densities (kg/m³) for the quadratic load formulas.
@@ -209,7 +211,8 @@ impl Default for Sim {
 }
 
 impl Sim {
-    /// A boat with the default cruising-sailboat keel profile (fin keel,
+    /// A boat with the default keel profile for the current (and, for now,
+    /// only) modeled ship type: a small cruising sailboat (fin keel,
     /// skeg-hung rudder).
     pub fn new() -> Sim {
         Self::new_with_keel(&KeelProfile::default_sailboat())

@@ -441,9 +441,12 @@ async fn main() {
             let b = bl(bx2, by2);
             draw_line(a.x, a.y, b.x, b.y, (0.18 * scale).max(1.0), hull_line);
         }
-        // Deck details: foredeck lines, coachroof, cockpit, sprayhood, mast
-        // + boom. A cruising sailboat under engine in harbour — sails
-        // furled/down (no sail force modeled), but the rig is still there.
+        // Deck details for the current (and, for now, only) modeled ship
+        // type — a small cruising sailboat: foredeck lines, coachroof,
+        // cockpit, sprayhood, mast + boom (rendered even with the sail
+        // furled/down — see Simulation model in CLAUDE.md; the rig is
+        // cosmetic, not a physics input). A future second ship type would
+        // get its own rendering branch alongside this one.
         let d1 = bl(3.2, 0.0);
         let d2a = bl(4.2, 1.2);
         let d2b = bl(4.2, -1.2);

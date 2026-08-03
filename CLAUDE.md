@@ -1,13 +1,17 @@
 # Harbour Sim — mooring simulator
 
 Rust + macroquad 0.4.15 + Rapier 2D, compiled to WebAssembly and served via
-GitHub Pages. Top-down simulator of a small cruising sailboat docking in a
-harbour under engine — sails furled/down throughout, no sail force modeled;
-wind is purely an external load, same as it would be on any boat lying to
-it. Currently a proof of concept — the boat lies alongside a fixed quay
-under adjustable wind and current. The goal is mooring manoeuvres with
-placeable ropes (bow/stern lines, springs) under different conditions;
-ropes, scenarios and scoring are future work.
+GitHub Pages. Top-down simulator of a small vessel docking in a harbour under
+engine — currently a proof of concept: the boat lies alongside a fixed quay
+under adjustable wind and current. The modeled vessel is, for now, always a
+small cruising sailboat (sails furled/down throughout — no sail force
+modeled; wind is purely an external load, same as it would be on any small
+boat lying to it). Supporting other small-vessel types alongside the
+sailboat (see Roadmap) is the agreed direction, not yet built — nothing in
+`sim-core` or the renderer should be read as a permanent sailboat-only
+decision. The goal is mooring manoeuvres with placeable ropes (bow/stern
+lines, springs) under different conditions; ropes, scenarios and scoring are
+future work.
 
 Boilerplate and pipeline are copied from **dannyrhubarb/pegasus** (2026-08) —
 when in doubt about a pattern or a CI gotcha, that repo's CLAUDE.md is the
@@ -143,9 +147,11 @@ interpolation (`lerp` + shortest-path angle lerp) like Pegasus.
 - **Boat**: one dynamic body, convex-hull collider of `HULL_PTS` (bow = +x
   local, ~12 m × 3.8 m, ~7.5 t via `HULL_DENSITY`). `HULL_PTS` is shared
   with the renderer, so **visuals match collision exactly** (the Pegasus
-  alignment rule). A small cruising sailboat: coachroof, cockpit, sprayhood,
-  mast + boom (rendered even with the sail furled — see Frontend
-  conventions below); the rig is cosmetic, not a physics input.
+  alignment rule). Currently the hull, keel profile, windage coefficients,
+  and rendering (coachroof, cockpit, sprayhood, mast + boom — see Frontend
+  conventions below) are all sized for the one ship type in service: a
+  small cruising sailboat. See **Ship types** under Roadmap for how a
+  second type would be added.
 - **Env** (`wind_from_deg`, `wind_speed`, `current_to_deg`, `current_speed`):
   compass convention 0° = north = +y, 90° = east = +x. Wind is named by
   where it blows FROM (mariners' convention), current by where it sets
@@ -268,6 +274,20 @@ interpolation (`lerp` + shortest-path angle lerp) like Pegasus.
   mouse press).
 
 ## Roadmap (agreed direction, not yet built)
+- **Ship types**: right now `Sim`/the renderer always build the one small
+  cruising sailboat described under Simulation model — hull geometry
+  (`HULL_PTS`, `HULL_DENSITY`), windage coefficients (`CD_AIR_BOW`/
+  `CD_AIR_STERN`, `WIND_AREA_*`), keel profile (`KeelProfile::
+  default_sailboat()`), and the deck rendering are all plain constants/
+  functions, not behind any ship-type abstraction. The agreed direction is
+  to support a small number of other small-vessel types later (starting
+  candidate: a plain workboat, which is what this sailboat itself replaced
+  — see git history) by giving each its own set of these, picked at
+  `Sim::new`/spawn time. Deliberately not built yet: a trait or enum for a
+  single existing variant would be speculative generality (see this file's
+  own rule against designing for hypothetical future requirements); add
+  the abstraction once a second ship type actually needs to coexist with
+  the first.
 - **Ropes**: placeable mooring lines (bow/stern/springs) — each a constraint
   or spring force between a hull fairlead and a quay bollard, applied inside
   `tick` from a future `InputState`. Then: engine/rudder, scenarios

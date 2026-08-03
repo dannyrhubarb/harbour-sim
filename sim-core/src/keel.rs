@@ -157,13 +157,15 @@ impl KeelProfile {
         }
     }
 
-    /// The default cruising-sailboat profile: a moderate fin keel with a
+    /// The default profile for the current (and, for now, only) modeled
+    /// ship type — a small cruising sailboat: a moderate fin keel with a
     /// skeg-hung rudder, biased aft. Hand-tuned to land close to (not
     /// identical to) the legacy constants it replaces (`WATER_AREA_LAT =
     /// 12`, `WATER_CLR_OFFSET = -0.6`, `C_YAW_Q = 400_000` — derives to
     /// area≈11.9, clr≈-0.87, C_YAW_Q≈353k) so existing behaviour doesn't
     /// shift much underfoot; the curve is the source of truth from here on,
-    /// not the old numbers.
+    /// not the old numbers. A future second ship type would get its own
+    /// `default_*` profile alongside this one, not a replacement of it.
     pub fn default_sailboat() -> KeelProfile {
         KeelProfile {
             points: vec![
