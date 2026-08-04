@@ -127,7 +127,18 @@ icons + revision injection; `.github/actions/sync-pages-branch` = commit into
   that station (not from the baseline) so it reads as an appendage
   hanging off the hull rather than overlapping the editable area; needed
   once the rudder stopped being part of the paintable profile (see the
-  Keel profile bullet under Simulation model).
+  Keel profile bullet under Simulation model). Also draws a **CG marker**
+  (2026-08-04, green, label at the canvas bottom so it can't collide
+  with CLR's top label): the boat's centre of mass via
+  `sim::hull_com_x()` — the `HULL_PTS` polygon centroid, i.e. the same
+  COM Rapier derives from the uniform hull spread, unit-tested against
+  Rapier's own `local_center_of_mass` so the marker can't drift from the
+  physics. Deliberately separate from the CLR marker: CG follows only
+  the hull outline (x ≈ −0.46 m, fixed) while CLR follows the painted
+  keel curve (HR 38 ≈ −0.72 m, Alajuela ≈ −1.5 m), and their gap is the
+  lever arm that turns sway force into yaw moment. When adjustable mass
+  distribution lands (Roadmap), the marker must read the design instead
+  of this constant.
 - `index.html` — web wrapper: boot guard (standalone script ahead of the
   bundle that paints script errors on screen), loading overlay,
   `__GIT_REVISION__` placeholder (deploy-time sed → wasm `?v=` cache-buster),
