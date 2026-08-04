@@ -107,10 +107,12 @@ impl KeelEditor {
         }
     }
 
-    /// A click/tap at `p` (screen px) on one of the four buttons, if any.
+    /// A click/tap at `p` (screen px) on one of the five buttons, if any.
     /// Shared by mouse-click and touch-tap.
     fn button_at(&mut self, buttons: EditorButtons, p: Vec2) -> EditorAction {
-        if buttons.fin.contains(p) {
+        if buttons.default.contains(p) {
+            self.load(&KeelProfile::default_sailboat());
+        } else if buttons.fin.contains(p) {
             self.load(&KeelProfile::fin_keel());
         } else if buttons.long.contains(p) {
             self.load(&KeelProfile::long_keel());
@@ -123,8 +125,8 @@ impl KeelEditor {
     }
 
     /// Handle mouse/touch/keyboard input for one frame. `canvas` is the
-    /// graph area in screen pixels; `buttons` are the (fin, long, apply,
-    /// cancel) button rects, also in screen pixels.
+    /// graph area in screen pixels; `buttons` are the (default, fin, long,
+    /// apply, cancel) button rects, also in screen pixels.
     pub fn update(&mut self, canvas: Rect, buttons: EditorButtons) -> EditorAction {
         let (mx, my) = mouse_position();
         let cur = vec2(mx, my);
@@ -171,6 +173,11 @@ impl KeelEditor {
             return touch_action;
         }
 
+        // D is helm-to-starboard in the game, but the editor freezes all
+        // game input while open, so reusing it here can't conflict.
+        if is_key_pressed(KeyCode::D) {
+            self.load(&KeelProfile::default_sailboat());
+        }
         if is_key_pressed(KeyCode::F) {
             self.load(&KeelProfile::fin_keel());
         }
@@ -349,6 +356,7 @@ impl KeelEditor {
 
         // Buttons.
         for (rect, label) in [
+            (buttons.default, "Default [D]"),
             (buttons.fin, "Fin keel [F]"),
             (buttons.long, "Long keel [L]"),
             (buttons.apply, "Apply [Enter]"),
@@ -363,6 +371,7 @@ impl KeelEditor {
 
 #[derive(Clone, Copy)]
 pub struct EditorButtons {
+    pub default: Rect,
     pub fin: Rect,
     pub long: Rect,
     pub apply: Rect,
@@ -370,21 +379,22 @@ pub struct EditorButtons {
 }
 
 impl EditorButtons {
-    /// Lay the four buttons out under `canvas` in a row, sized to fill
+    /// Lay the five buttons out under `canvas` in a row, sized to fill
     /// exactly `canvas.w` — a fixed button width could overflow the canvas
     /// (and the screen) on narrow viewports, working against the whole
     /// point of having a touch-reachable editor.
     pub fn under(canvas: Rect, ui: f32) -> EditorButtons {
         let gap = 14.0 * ui;
-        let bw = (canvas.w - gap * 3.0) / 4.0;
+        let bw = (canvas.w - gap * 4.0) / 5.0;
         let bh = 40.0 * ui;
         let y = canvas.y + canvas.h + 74.0 * ui;
         let x0 = canvas.x;
         EditorButtons {
-            fin: Rect::new(x0, y, bw, bh),
-            long: Rect::new(x0 + (bw + gap), y, bw, bh),
-            apply: Rect::new(x0 + (bw + gap) * 2.0, y, bw, bh),
-            cancel: Rect::new(x0 + (bw + gap) * 3.0, y, bw, bh),
+            default: Rect::new(x0, y, bw, bh),
+            fin: Rect::new(x0 + (bw + gap), y, bw, bh),
+            long: Rect::new(x0 + (bw + gap) * 2.0, y, bw, bh),
+            apply: Rect::new(x0 + (bw + gap) * 3.0, y, bw, bh),
+            cancel: Rect::new(x0 + (bw + gap) * 4.0, y, bw, bh),
         }
     }
 }
