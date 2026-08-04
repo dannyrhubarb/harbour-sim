@@ -2,7 +2,7 @@
 //! lateral area per unit length along the hull, drag a displacement
 //! slider, see the derived hydrodynamic constants (area, centre of lateral
 //! resistance, yaw damping) update live, and apply the result to a fresh
-//! `Sim`. The three preset buttons load real reference boats' designs
+//! `Sim`. The four preset buttons load real reference boats' designs
 //! (curve AND weight together — see `boat.rs` / `docs/reference-boats.md`).
 //!
 //! Frontend-only (macroquad) — the editor manipulates a `BoatDesign` value
@@ -157,7 +157,7 @@ impl KeelEditor {
         }
     }
 
-    /// A click/tap at `p` (screen px) on one of the five buttons, if any.
+    /// A click/tap at `p` (screen px) on one of the six buttons, if any.
     /// Shared by mouse-click and touch-tap. The preset buttons load the
     /// whole design — curve AND displacement — because each is a real
     /// boat, not just a keel shape.
@@ -166,6 +166,8 @@ impl KeelEditor {
             self.load_design(&BoatDesign::hallberg_rassy_38());
         } else if layout.oday.contains(p) {
             self.load_design(&BoatDesign::oday_39());
+        } else if layout.elan.contains(p) {
+            self.load_design(&BoatDesign::elan_impression_394());
         } else if layout.alajuela.contains(p) {
             self.load_design(&BoatDesign::alajuela_38());
         } else if layout.apply.contains(p) {
@@ -251,7 +253,7 @@ impl KeelEditor {
             return touch_action;
         }
 
-        // D/F/L load the preset boats. D is helm-to-starboard and the
+        // D/F/G/L load the preset boats. D is helm-to-starboard and the
         // arrows are env keys in the game, but the editor freezes all game
         // input while open, so reusing them here can't conflict.
         if is_key_pressed(KeyCode::D) {
@@ -259,6 +261,9 @@ impl KeelEditor {
         }
         if is_key_pressed(KeyCode::F) {
             self.load_design(&BoatDesign::oday_39());
+        }
+        if is_key_pressed(KeyCode::G) {
+            self.load_design(&BoatDesign::elan_impression_394());
         }
         if is_key_pressed(KeyCode::L) {
             self.load_design(&BoatDesign::alajuela_38());
@@ -480,12 +485,13 @@ impl KeelEditor {
             text,
         );
 
-        // Buttons. The three presets are real boats (design = curve +
+        // Buttons. The four presets are real boats (design = curve +
         // weight, specs in docs/reference-boats.md); labels shrink to fit
         // their button so the boat names survive narrow viewports.
         for (rect, label) in [
             (layout.hr38, "HR 38 [D]"),
             (layout.oday, "O'Day 39 [F]"),
+            (layout.elan, "Elan 394 [G]"),
             (layout.alajuela, "Alajuela 38 [L]"),
             (layout.apply, "Apply [Enter]"),
             (layout.cancel, "Cancel [Esc]"),
@@ -503,12 +509,13 @@ impl KeelEditor {
     }
 }
 
-/// The editor's interactive regions below the curve canvas: the three
+/// The editor's interactive regions below the curve canvas: the four
 /// preset-boat buttons, Apply/Cancel, and the displacement slider track.
 #[derive(Clone, Copy)]
 pub struct EditorLayout {
     pub hr38: Rect,
     pub oday: Rect,
+    pub elan: Rect,
     pub alajuela: Rect,
     pub apply: Rect,
     pub cancel: Rect,
@@ -519,22 +526,23 @@ pub struct EditorLayout {
 
 impl EditorLayout {
     /// Lay out the rows under `canvas`: readout text (drawn by `draw`,
-    /// not a rect here), then the displacement slider, then the five
+    /// not a rect here), then the displacement slider, then the six
     /// buttons sized to fill exactly `canvas.w` — a fixed button width
     /// could overflow the canvas (and the screen) on narrow viewports,
     /// working against the whole point of having a touch-reachable editor.
     pub fn under(canvas: Rect, ui: f32) -> EditorLayout {
-        let gap = 14.0 * ui;
-        let bw = (canvas.w - gap * 4.0) / 5.0;
+        let gap = 12.0 * ui;
+        let bw = (canvas.w - gap * 5.0) / 6.0;
         let bh = 40.0 * ui;
         let y = canvas.y + canvas.h + 104.0 * ui;
         let x0 = canvas.x;
         EditorLayout {
             hr38: Rect::new(x0, y, bw, bh),
             oday: Rect::new(x0 + (bw + gap), y, bw, bh),
-            alajuela: Rect::new(x0 + (bw + gap) * 2.0, y, bw, bh),
-            apply: Rect::new(x0 + (bw + gap) * 3.0, y, bw, bh),
-            cancel: Rect::new(x0 + (bw + gap) * 4.0, y, bw, bh),
+            elan: Rect::new(x0 + (bw + gap) * 2.0, y, bw, bh),
+            alajuela: Rect::new(x0 + (bw + gap) * 3.0, y, bw, bh),
+            apply: Rect::new(x0 + (bw + gap) * 4.0, y, bw, bh),
+            cancel: Rect::new(x0 + (bw + gap) * 5.0, y, bw, bh),
             // 55% of the width for the track leaves room for the value
             // label on the right; 26 px tall so it's a real touch target.
             weight: Rect::new(x0, canvas.y + canvas.h + 56.0 * ui, canvas.w * 0.55, 26.0 * ui),
