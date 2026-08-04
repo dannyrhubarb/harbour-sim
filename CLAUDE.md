@@ -489,18 +489,63 @@ like Pegasus.
   inputs from `HULL_PTS`/`KeelProfile` the same way `wetted_surface_area`
   does now — sharpens the amplitude for this hull without changing the
   function class.
-- **Sway/yaw hydrodynamics** (unaffected by the above — still quadratic +
-  linear drag on velocity RELATIVE TO THE WATER, via the real ρ·Cd·A
-  formulas): a uniform current is just "the water moves", so the same term
-  both damps the boat and carries it along. The linear terms ARE still
-  deliberate here (unlike surge, which dropped its linear term — see
-  above): sway/yaw's quadratic coefficients are keel-profile-derived, and
-  a profile far from the one a fixed linear floor was tuned against would
-  fall out of proportion, so each uses a crossover speed/rate scaled by the
-  profile's own quadratic coefficient instead. World-frame Rapier damping
-  would fight a current instead of converging to it (holds the boat below
-  water speed), so all drag lives in `tick`, relative to the water, and the
-  body's Rapier damping is 0.
+- **Sway/yaw hydrodynamics are ONE strip model with two halves** (the
+  second half added 2026-08-04; before that the sim had only the first and
+  turned "like a containership" going ahead). Each fore-aft station sees
+  the local lateral relative flow `V(x) = v + w·χ` (χ measured from the
+  COM) and the two halves are the separated and attached responses to it:
+  - **Separated half — cross-flow drag** (quadratic + linear, on velocity
+    RELATIVE TO THE WATER, via the real ρ·Cd·A formulas with the
+    `drag_*` keel moments): a uniform current is just "the water moves",
+    so the same term both damps the boat and carries it along. The linear
+    terms ARE deliberate here (unlike surge, which dropped its linear
+    term — see above): sway/yaw's quadratic coefficients are
+    keel-profile-derived, and a profile far from the one a fixed linear
+    floor was tuned against would fall out of proportion, so each uses a
+    crossover speed/rate scaled by the profile's own quadratic
+    coefficient instead. World-frame Rapier damping would fight a current
+    instead of converging to it (holds the boat below water speed), so
+    all drag lives in `tick`, relative to the water, and the body's
+    Rapier damping is 0.
+  - **Attached half — strip momentum exchange** (`AttachedFlow` /
+    `attached_flow_coeffs` in sim.rs, coefficients integrated once per
+    `Sim` from the profile's section added mass `m_a(x) = ρ·π/2·a(x)²`,
+    the mirrored-plate value): the hull under way exchanges lateral
+    momentum like a low-aspect-ratio wing, `dY/dx = u·d/dx[m_a·V]`,
+    integrated from the bow back to the AFTMOST m_a-peak station and cut
+    there (the Kutta condition — past the peak the ideal flow would hand
+    the momentum back; really it separates at the keel's trailing edge
+    and leaves in the wake; this cut is the ONE structural judgement,
+    everything else derives). One integral yields the three classical
+    results at once: Jones' slender-wing keel lift EXACTLY
+    (`attached_flow_reproduces_jones_slender_wing_lift` pins it — this is
+    what lets the boat carve a turn from ~3° of leeway instead of
+    ploughing a 25° quadratic-drag skid), the destabilizing Munk moment
+    (`attached_flow_moment_is_destabilizing_ahead` — bow-into-the-turn
+    eagerness; overall directional stability comes from the rudder foil
+    standing in the flow aft, the real mechanism), and the ideal
+    yaw-rate coupling. Not fragile by construction: scales as u·V ∝
+    U²·sinβ·cosβ, self-saturating at 45° drift and zero at rest / pure
+    sway / pure yaw, exactly where the separated half is the right
+    physics. **Ahead only** — the model assumes clean flow developing
+    from the leading end; that's textbook for the fine bow entry but
+    false making sternway (the aft "leading end" carries the deflected
+    rudder, turning prop and aperture; astern derivatives are measured,
+    not slender-body-derived, in the literature too). Found empirically
+    first: an astern branch strangled the backing turn (18.6 m → 35.8 m
+    for 90° at 2.5 kn against a real 8–16 m benchmark) via its
+    u-proportional yaw damping — backing agility really does live in the
+    rudder's wind-up instability plus cross-flow drag, which is what the
+    sim already had right. Measured effect of the attached half
+    (O'Day 39, full rudder at 2.5 kn, engine neutral): 90° ahead in
+    26.1 m (~2.2 boat lengths, real fin-keeler benchmark ~2) vs. NEVER
+    without it (75° after 34 m, still going); backing bit-identical
+    (`a_forward_turn_carves_instead_of_ploughing` locks the ahead
+    benchmark in-suite). Watch out when reproducing turn measurements:
+    the berth spawn is 2.4 m off the quay and a starboard turn's first
+    move is the stern swinging INTO it — the collision impulse reads
+    exactly like a physics bug until you print the hull corners
+    (`set_pose` exists test-side for open-water arenas because of this).
 - **Force application points create the characteristic behaviours**: lateral
   wind force acts slightly FORWARD of centre (`WIND_CENTER_OFFSET > 0`, bow
   windage → the bow falls off downwind). Tune behaviour there, not with
