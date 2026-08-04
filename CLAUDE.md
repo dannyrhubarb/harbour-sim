@@ -546,6 +546,23 @@ like Pegasus.
     move is the stern swinging INTO it — the collision impulse reads
     exactly like a physics bug until you print the hull corners
     (`set_pose` exists test-side for open-water arenas because of this).
+    **The benchmark protocol matters as much as the model** (2026-08-04,
+    measured while investigating "not quite around the mast yet"; don't
+    chase these gaps with model changes, they're helmsmanship): slamming
+    the helm hard-over STALLS the blade (35° ≫ the ~17° stall onset —
+    lift collapses to ~¼ of the attached peak until the yaw sweep
+    catches up), so a 2 s progressive lead-in alone tightens 90° at
+    2.5 kn from 24.8 m to 21.6 m, matching the real-world "lead the boat
+    smoothly into the turn" instinct; adding a full-throttle burst over
+    the deflected blade (prop wash) gives 17.5 m ≈ 1.5 boat lengths —
+    the real tight-harbour-turn technique, and the sim now rewards it
+    for the real reasons. Ruled OUT while investigating, with numbers:
+    the rudder's position (its washout kinematics permit a ~9 m radius;
+    the measured average is 16.6 m — not the binding constraint, and
+    moving the blade to the O'Day's slightly-forward real post position
+    would cut the entry moment 15% for a limit we never reach) and the
+    yaw inertia (Rapier's uniform hull spread happens to land at
+    gyradius 0.27·LOA, inside the real 0.25–0.30·LOA sailboat band).
 - **Force application points create the characteristic behaviours**: lateral
   wind force acts slightly FORWARD of centre (`WIND_CENTER_OFFSET > 0`, bow
   windage → the bow falls off downwind). Tune behaviour there, not with
