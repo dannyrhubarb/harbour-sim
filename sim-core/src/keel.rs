@@ -1,5 +1,6 @@
 //! Underwater lateral-area distribution along the hull's fore-aft axis, and
-//! the hydrodynamic constants derived from it.
+//! the hydrodynamic constants derived from it. The named preset profiles
+//! (real reference boats, with their displacements) live in `boat.rs`.
 //!
 //! The centre of lateral resistance (the sway force's lever arm) and the
 //! yaw damping coefficient used to be two independently hand-tuned
@@ -121,66 +122,6 @@ impl KeelProfile {
         0.0
     }
 
-    /// Fin/spade keel: lateral area concentrated in a short, deep patch
-    /// near amidships. The rest of the hull isn't zero either: a thin
-    /// baseline of wetted lateral area runs the full length (every hull
-    /// has *some* draught, even without a deep keel) — the fin is a bump
-    /// on top of that, not the only area that exists. Small lever arm,
-    /// weak yaw damping overall — spins much more freely than a long keel.
-    /// Does NOT include the rudder (see the module doc comment) — that's
-    /// modeled entirely as a separate movable foil in `sim.rs`, which is
-    /// also why this preset's yaw damping is now noticeably lower than it
-    /// used to be: the old version double-counted the rudder as a fixed
-    /// area strip on top of what the foil model already provides.
-    pub fn fin_keel() -> KeelProfile {
-        const BASELINE: f32 = 0.15;
-        KeelProfile {
-            points: vec![
-                Vec2::new(-6.0, BASELINE),
-                Vec2::new(-1.0, BASELINE),
-                Vec2::new(-0.5, 3.6), // the fin
-                Vec2::new(0.5, 3.6),
-                Vec2::new(1.0, BASELINE),
-                Vec2::new(6.0, BASELINE),
-            ],
-        }
-    }
-
-    /// Long/full keel: lateral area spread nearly the whole hull length,
-    /// biased aft toward the rudder post. Large lever arm, strong yaw
-    /// damping — resists spinning.
-    pub fn long_keel() -> KeelProfile {
-        KeelProfile {
-            points: vec![
-                Vec2::new(-6.0, 1.9),
-                Vec2::new(-3.5, 2.3),
-                Vec2::new(-0.5, 1.7),
-                Vec2::new(3.0, 1.0),
-                Vec2::new(6.0, 0.3),
-            ],
-        }
-    }
-
-    /// The default profile for the current (and, for now, only) modeled
-    /// ship type — a small cruising sailboat: a moderate fin keel with a
-    /// skeg-hung rudder, biased aft. Hand-tuned to land close to (not
-    /// identical to) the legacy constants it replaces (`WATER_AREA_LAT =
-    /// 12`, `WATER_CLR_OFFSET = -0.6`, `C_YAW_Q = 400_000` — derives to
-    /// area≈11.9, clr≈-0.87, C_YAW_Q≈353k) so existing behaviour doesn't
-    /// shift much underfoot; the curve is the source of truth from here on,
-    /// not the old numbers. A future second ship type would get its own
-    /// `default_*` profile alongside this one, not a replacement of it.
-    pub fn default_sailboat() -> KeelProfile {
-        KeelProfile {
-            points: vec![
-                Vec2::new(-6.0, 1.0),
-                Vec2::new(-3.2, 1.6),
-                Vec2::new(-0.5, 0.9),
-                Vec2::new(2.5, 0.7),
-                Vec2::new(6.0, 0.7),
-            ],
-        }
-    }
 }
 
 #[cfg(test)]
@@ -236,25 +177,4 @@ mod tests {
         assert_eq!(profile.sample(5.0), 0.0);
     }
 
-    #[test]
-    fn fin_keel_has_lower_area_normalized_cubic_moment_than_long_keel() {
-        let fin = KeelProfile::fin_keel().derive();
-        let long = KeelProfile::long_keel().derive();
-        // The whole point of a fin keel: concentrating the BULK of its area
-        // near the pivot trades away yaw damping much faster than it trades
-        // away area, because the yaw term is cubic in distance from the
-        // pivot. Compare cubic moment PER UNIT AREA — the presets don't
-        // have similar total areas, so an absolute comparison could pass
-        // for the wrong reason (fin just has less area overall, not less
-        // per unit of it).
-        let fin_per_area = fin.cubic_moment / fin.area;
-        let long_per_area = long.cubic_moment / long.area;
-        assert!(
-            fin_per_area < long_per_area * 0.5,
-            "fin cubic_moment/area {} should be below long's {}",
-            fin_per_area,
-            long_per_area
-        );
-        assert!(fin.clr_offset.abs() < long.clr_offset.abs());
-    }
 }
