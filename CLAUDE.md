@@ -93,11 +93,14 @@ icons + revision injection; `.github/actions/sync-pages-branch` = commit into
     curve by integration, see Simulation model below).
   - `sim-core/src/boat.rs` — `BoatDesign` (2026-08-04): the parameter
     bundle the keel editor edits and `Sim::new_with_design` consumes — a
-    `KeelProfile` plus `displacement_kg`. Four presets named after REAL
+    `KeelProfile`, a `RudderDesign` (blade position/dimensions/end-plate
+    flag, per-preset since 2026-08-04 — see the Rudder bullet under
+    Simulation model), and `displacement_kg`. Four presets named after REAL
     boats (published specs, sources and the shared-hull caveat in
     `docs/reference-boats.md`): `hallberg_rassy_38()` (default — fin +
     skeg middle configuration, 8.5 t), `oday_39()` (fin + spade, 8.165 t
-    — same boat the rudder blade constants were sized from),
+    — the rudder-sizing anchor: its blade is the one with real published
+    dimensions),
     `elan_impression_394()` (2026-08-04, modern shallow-bodied cruiser,
     8.0 t — smallest lateral plane and least yaw damping of the four;
     its spec pages 403'd so the figures were triangulated from search
@@ -106,8 +109,9 @@ icons + revision injection; `.github/actions/sync-pages-branch` = commit into
     The curve's unit makes the
     naming honest: area-per-length at a station IS local draught (m), so
     presets are capped at each boat's real draft (unit-tested). NOT a
-    ship-type abstraction — hull outline/windage/engine/rudder stay the
-    single shared sailboat (see Roadmap).
+    ship-type abstraction — hull outline/windage/engine stay the single
+    shared sailboat (see Roadmap); a design varies keel, rudder and
+    weight on it.
 - `src/main.rs` — macroquad frontend: input, fixed-timestep loop with render
   interpolation, top-down rendering (water/ripples, quay, breakwaters, boat),
   HUD (wind/current dials, throttle/rudder sliders, SOG readout, key help),
@@ -126,10 +130,11 @@ icons + revision injection; `.github/actions/sync-pages-branch` = commit into
   recycled-id rules as the HUD dials) so a drag that starts on the track
   can't start painting bars when it sweeps across the curve canvas.
   Frontend-only — hands a plain `BoatDesign` value to
-  sim-core, never reaches into physics directly. Also draws a fixed,
-  non-paintable rudder marker (2026-08-03) at `sim::{RUDDER_X,
-  RUDDER_CHORD, RUDDER_DEPTH}` — the same `pub` constants the physics
-  uses, not a separate guess — stacked BELOW whatever the curve is at
+  sim-core, never reaches into physics directly. Also draws a
+  non-paintable rudder marker (2026-08-03; since 2026-08-04 from the
+  LOADED DESIGN's own `RudderDesign`, so it moves/resizes per preset and
+  is carried through Apply — the same values the physics uses, not a
+  separate guess) — stacked BELOW whatever the curve is at
   that station (not from the baseline) so it reads as an appendage
   hanging off the hull rather than overlapping the editable area; needed
   once the rudder stopped being part of the paintable profile (see the
@@ -252,7 +257,13 @@ like Pegasus.
   defensively at the top of `tick` so a corrupt recording can't command
   super-physical inputs.
 - **Engine & propeller** (~28 hp auxiliary, fixed right-handed 3-blade
-  prop): thrust acts at `PROP_X` (local −5.6 m). `Sim.engine` is the
+  prop): thrust, walk and wash act at the prop's station, which since
+  2026-08-04 is DERIVED per design as `rudder.x + PROP_AHEAD_OF_RUDDER`
+  (0.5 m ahead of the blade) instead of the old fixed `PROP_X = −5.6` —
+  real geometry on every reference boat has the prop just forward of its
+  rudder, and it's load-bearing: the prop-wash steering term assumes the
+  blade stands in the race, which is only true if the prop leads it
+  whatever design is active. `Sim.engine` is the
   telegraph filtered by a first-order lag (`THROTTLE_TAU` 0.4 s) — sim
   STATE, not input, advanced only inside `tick` and reset for free by the
   fresh-`Sim`-per-run rule (`engine_spools_rather_than_steps`). Thrust =
@@ -265,11 +276,25 @@ like Pegasus.
   |thrust|: `PROP_WALK_AHEAD` 0.06 (stern nudges starboard) vs
   `PROP_WALK_ASTERN` 0.13 (stern kicks port — "backs to port",
   `a_burst_astern_walks_the_stern_to_port`).
-- **Rudder** (constants in sim.rs, blade at `RUDDER_X` −5.9 m,
-  `RUDDER_CHORD` 0.61 m × `RUDDER_DEPTH` 1.52 m = 0.93 m², ±35°, all `pub`
-  so the keel editor can draw the blade at its true size/position): a
+- **Rudder** (per-design since 2026-08-04: `RudderDesign { x, chord,
+  depth, root_endplated }` on `BoatDesign`, derived once per `Sim` into
+  `RudderFoil` — area, effective AR, post-stall ceiling; ±35° stays a
+  shared constant, a property of typical steering gear rather than of a
+  boat. Each preset carries its real boat's blade — the O'Day's
+  replacement-listing dimensions are the anchor, the others derived from
+  type + profile + the %-of-lateral-plane cross-check, all documented in
+  boat.rs / reference-boats.md. Blade POSITIONS map in WATERLINE space
+  because `HULL_PTS` *is* the modeled waterline — an LOA-space mapping
+  double-counts overhangs the model doesn't have (found live: it moved
+  the O'Day spade to −5.1 and the coast turn collapsed). A transom-hung
+  blade's root breaks the surface with air above it → NO end-plate
+  mirror, AR = depth/chord not 2×, which is why the Alajuela's barn door
+  is mushier per m² than the spades. The editor draws the loaded design's
+  blade and carries it through Apply, but doesn't edit it yet —
+  follow-up work): a
   foil in the LOCAL water-relative flow at the stern — surge/sway PLUS the
-  yaw sweep `w·RUDDER_X`, which is the rudder half of the keel coupling
+  yaw sweep `w·x` at the blade's station, which is the rudder half of the
+  keel coupling
   (the keel's moments set how fast yaw builds; built-up yaw feeds the
   rudder's angle of attack).
   **Blade dimensions (2026-08-03, second pass) — sized from a real boat,
@@ -281,7 +306,7 @@ like Pegasus.
   ≈0.93 m²) and the lateral-plane rule of thumb (rudder ≈10% of total
   underwater lateral plane, which against this hull's own
   `KeelDerived.area` solves to ≈0.95 m²). `RUDDER_AR` is now DERIVED as
-  `2·(RUDDER_DEPTH/RUDDER_CHORD)` instead of asserted as a bare `3.0`
+  `2·(depth/chord)` instead of asserted as a bare `3.0`
   independently of the blade's own dimensions — the old value implied a
   geometric AR of ~1.5 before doubling, but the blade's own literal
   dimensions gave 3.375, an inconsistency that went unnoticed until sized

@@ -13,7 +13,7 @@
 //! which is what will make recordings/replays possible later exactly like
 //! Pegasus.
 
-use crate::boat::BoatDesign;
+use crate::boat::{BoatDesign, RudderDesign};
 use crate::keel::{flat_plate_cd, KeelDerived, KeelProfile};
 use glam::Vec2;
 use rapier2d::prelude::*;
@@ -236,7 +236,7 @@ fn hull_half_beam(x: f32) -> f32 {
 /// depth-per-length profile can do. The rudder's own wetted area (both
 /// faces) is added separately since it's a movable appendage the profile
 /// deliberately excludes (see `keel.rs`'s module doc comment).
-fn wetted_surface_area(profile: &KeelProfile) -> f32 {
+fn wetted_surface_area(profile: &KeelProfile, rudder: &RudderDesign) -> f32 {
     const SUBSTEPS: usize = 64;
     use std::f32::consts::FRAC_PI_2;
     let (x0, x1) = HULL_PTS
@@ -250,7 +250,7 @@ fn wetted_surface_area(profile: &KeelProfile) -> f32 {
         let xb = xa + dx;
         wsa += 0.5 * (girth(xa) + girth(xb)) * dx;
     }
-    wsa + 2.0 * RUDDER_CHORD * RUDDER_DEPTH
+    wsa + 2.0 * rudder.area()
 }
 
 // ---------------------------------------------------------------------------
@@ -514,9 +514,19 @@ const ASTERN_RATIO: f32 = 0.6;
 /// u/(|n|·U_PROP_RACE), so backing off the throttle lowers both the bollard
 /// thrust AND the speed the falloff bites at, like a real fixed prop.
 const U_PROP_RACE: f32 = 6.0;
-/// Where thrust (and prop walk) act along the hull: just forward of the
-/// transom, aft of the keel. Local x, metres.
-const PROP_X: f32 = -5.6;
+/// Clearance (m) between the propeller and the rudder stock: the prop sits
+/// this far AHEAD of the blade, whatever design is active (2026-08-04,
+/// replacing the fixed `PROP_X = -5.6` that was placed relative to the old
+/// shared rudder). Real geometry on every one of the reference boats has
+/// the prop just forward of its rudder — shaft prop ahead of a spade,
+/// aperture prop in the deadwood ahead of a transom-hung blade — and it's
+/// load-bearing for the physics: the prop-wash steering term assumes the
+/// blade stands in the race, which is only true if the prop leads it. So
+/// the prop's station is DERIVED per design as `rudder.x +
+/// PROP_AHEAD_OF_RUDDER` (thrust, prop walk and the wash all act there)
+/// instead of being a constant that silently ends up abaft a
+/// forward-mounted spade.
+const PROP_AHEAD_OF_RUDDER: f32 = 0.5;
 /// First-order engine spool time constant (s): the delivered thrust chases
 /// the telegraph, it doesn't step. Sim state (`Sim::engine`), advanced only
 /// inside `tick` — deterministic.
@@ -534,60 +544,40 @@ const PROP_WALK_ASTERN: f32 = 0.13;
 // Rudder
 // ---------------------------------------------------------------------------
 
-/// Rudder stock position (local x, m): on the transom, aft of the prop and
-/// squarely in its wash. Public so the keel editor can draw the blade at
-/// its real position — the profile no longer paints it (see `keel.rs`),
-/// so this is now the only source of truth for where it sits.
-pub const RUDDER_X: f32 = -5.9;
-/// Blade chord (m), public for the same reason as `RUDDER_X`: the keel
-/// editor draws the blade's footprint from these directly.
-///
-/// 2026-08-03: was 0.4 m × 1.35 m (0.54 m², geometric AR 3.375) — picked
-/// without checking against a real boat. Cross-checked two ways: the
-/// O'Day 39 (one of the reference boats already used for this hull's own
-/// dimensions) has an actual spade rudder ~5 ft (1.52 m) deep, chord
-/// tapering 28 in (0.71 m) at the head to 20 in (0.51 m) at the tip,
-/// average ≈0.61 m — area ≈0.93 m². Independently, the lateral-plane rule
-/// of thumb (rudder ≈10% of total underwater lateral plane, hull+keel+
-/// rudder) against this hull's own `KeelDerived.area` (~8.5 m² at the
-/// default profile) solves to ≈0.95 m². Both land in the same place — the
-/// old 0.54 m² was undersized by roughly half. Rectangular blade here
-/// (this sim has no chord taper), sized to the O'Day's real depth and
-/// average chord rather than re-deriving from the percentage rule, since
-/// it also fixes `RUDDER_AR` below at the same time.
-pub const RUDDER_CHORD: f32 = 0.61;
-/// Blade depth (m) below the hull's own baseline draught. See
-/// `RUDDER_CHORD`'s comment — from the O'Day 39 reference (5 ft = 1.52 m).
-pub const RUDDER_DEPTH: f32 = 1.52;
-/// Blade area (m²) — `RUDDER_CHORD * RUDDER_DEPTH`, computed rather than
-/// duplicated so the editor's drawing and the physics can never disagree
-/// about the blade's size.
-const RUDDER_AREA: f32 = RUDDER_CHORD * RUDDER_DEPTH;
+// The rudder blade is no longer a set of shared constants here
+// (2026-08-04): position and dimensions live on the active `BoatDesign`
+// (`RudderDesign` in boat.rs — each preset carries its real boat's blade,
+// the O'Day's replacement-rudder listing being the one with published
+// dimensions and the others derived from type + profile + the
+// %-of-lateral-plane cross-check, see boat.rs). What the physics needs is
+// derived once per `Sim` in `RudderFoil::from` below. Hard-over angle and
+// the stall band stay shared: they're properties of the foil physics and
+// typical steering gear, not of a particular boat.
+
 /// Hard-over blade angle (degrees each way).
 const RUDDER_MAX_DEG: f32 = 35.0;
-/// Effective aspect ratio: the hull above the blade acts as an end plate,
-/// roughly doubling the geometric AR. Sets both the lift slope
-/// 2π·AR/(AR+2) and the induced drag CL²/(π·AR).
-///
-/// 2026-08-03: was a bare 3.0, independently of `RUDDER_CHORD`/
-/// `RUDDER_DEPTH` — inconsistent with itself (those dimensions' own
-/// geometric AR, depth/chord, was 3.375, not the ~1.5 this constant's own
-/// comment implied before doubling). Now DERIVED from the same real
-/// dimensions above instead of asserted separately: the O'Day 39
-/// reference's geometric AR is 1.52/0.61 ≈ 2.49, doubled for the endplate
-/// effect ≈5.0 — a single source of truth for the blade's shape, not two
-/// numbers that can silently drift apart.
-const RUDDER_AR: f32 = 2.0 * (RUDDER_DEPTH / RUDDER_CHORD);
-/// Broadside drag ceiling of THIS blade: the finite-plate law evaluated
-/// at the blade's own mirrored aspect ratio (see `flat_plate_cd` in
-/// keel.rs) — ≈1.20 for the real O'Day-sized blade, NOT the 2D limit
-/// 1.98 an infinitely long plate would give (2026-08-04 fix — the same
-/// second pass that corrected the keel material's Cd). Deriving it from
-/// `RUDDER_AR` means the lift slope and the post-stall drag now agree on
-/// how three-dimensional the blade is, instead of the lift side using the
-/// finite AR while the drag side quietly assumed an infinite plate — the
-/// same derive-don't-assert move as `RUDDER_AR` itself.
-const RUDDER_CD_MAX: f32 = flat_plate_cd(RUDDER_AR);
+
+/// The foil quantities `tick` needs every step, derived once per `Sim`
+/// from the design's `RudderDesign` — area, effective aspect ratio
+/// (mirror-doubled only when the root is end-plated, see boat.rs), and
+/// the finite-plate post-stall drag ceiling at that same AR
+/// (`flat_plate_cd`, keel.rs) — one AR feeding both the lift slope and
+/// the plate drag, so they can't disagree about the blade's
+/// three-dimensionality.
+#[derive(Clone, Copy, Debug)]
+struct RudderFoil {
+    x: f32,
+    area: f32,
+    ar: f32,
+    cd_max: f32,
+}
+
+impl RudderFoil {
+    fn from(r: &RudderDesign) -> RudderFoil {
+        let ar = r.aspect_ratio();
+        RudderFoil { x: r.x, area: r.area(), ar, cd_max: flat_plate_cd(ar) }
+    }
+}
 /// The lift curve is linear (attached flow) up to STALL_ON (~17°) and
 /// follows the Hoerner flat-plate law beyond STALL_OFF (~25°), linearly
 /// blended between so neither force has a step at the break (a step would
@@ -619,7 +609,7 @@ const K_WASH: f32 = 0.85;
 /// swept broadside by the hull's own spin). That's backwards: a stalled
 /// foil is approximately a flat plate, and a flat plate's force is
 /// LARGEST at 90°, not smallest. The flat-plate law gives the force
-/// normal to the CHORD (not the flow) as `RUDDER_CD_MAX·sin(mag)`, then
+/// normal to the CHORD (not the flow) as `foil.cd_max·sin(mag)`, then
 /// resolves it into lift/drag by the chord-to-flow angle — at mag=90°
 /// that's zero lift, maximum drag: the barn-door case that brakes a spin,
 /// falling out of the same geometry as the steering force instead of
@@ -630,7 +620,7 @@ const K_WASH: f32 = 0.85;
 /// edge leading, so fold by ±π first and serve all four quadrants from
 /// one curve — this single fold is what makes steering reverse correctly
 /// when backing, with zero special cases.
-fn rudder_lift_drag(alpha: f32) -> (f32, f32) {
+fn rudder_lift_drag(alpha: f32, foil: &RudderFoil) -> (f32, f32) {
     use std::f32::consts::{FRAC_PI_2, PI};
     const CD0: f32 = 0.01;
     let mut a = alpha;
@@ -640,11 +630,11 @@ fn rudder_lift_drag(alpha: f32) -> (f32, f32) {
         a += PI;
     }
     let mag = a.abs();
-    let lin_slope = 2.0 * PI * RUDDER_AR / (RUDDER_AR + 2.0);
+    let lin_slope = 2.0 * PI * foil.ar / (foil.ar + 2.0);
     let cl_lin = lin_slope * mag;
-    let cd_lin = CD0 + cl_lin * cl_lin / (PI * RUDDER_AR);
+    let cd_lin = CD0 + cl_lin * cl_lin / (PI * foil.ar);
     let s = mag.sin();
-    let cn = RUDDER_CD_MAX * s * s;
+    let cn = foil.cd_max * s * s;
     let cl_plate = cn * mag.cos();
     let cd_plate = cn * s + CD0;
     let (cl, cd) = if mag <= RUDDER_STALL_ON {
@@ -668,15 +658,15 @@ fn rudder_lift_drag(alpha: f32) -> (f32, f32) {
 /// frame; `tick` then rotates that local force into world space by `fwd`/
 /// `side` to apply it at the blade's world position. Neither side needs to
 /// know how the other is implemented.
-fn rudder_force(flow: Vec2, delta: f32) -> Vec2 {
+fn rudder_force(flow: Vec2, delta: f32, foil: &RudderFoil) -> Vec2 {
     if flow.length_squared() <= 1e-6 {
         return Vec2::ZERO;
     }
     let fhat = flow / flow.length();
     let chord = Vec2::new(-delta.cos(), delta.sin()); // stock → trailing edge
     let alpha = chord.perp_dot(fhat).atan2(chord.dot(fhat));
-    let (cl, cd) = rudder_lift_drag(alpha);
-    let q = 0.5 * RHO_WATER * RUDDER_AREA * flow.length_squared();
+    let (cl, cd) = rudder_lift_drag(alpha, foil);
+    let q = 0.5 * RHO_WATER * foil.area * flow.length_squared();
     Vec2::new(-fhat.y, fhat.x) * (q * cl) + fhat * (q * cd)
 }
 
@@ -770,6 +760,10 @@ pub struct Sim {
     /// the keel profile at construction, see `attached_flow_coeffs` and the
     /// block comment above it. Ahead only (see ibid.).
     att_flow: AttachedFlow,
+    /// The active design's rudder blade, in the derived form `tick` needs
+    /// (position, area, effective AR, post-stall ceiling) — see
+    /// `RudderFoil` and `RudderDesign` in boat.rs.
+    rudder: RudderFoil,
     /// Spooled engine response, -1..=1: the throttle input filtered through
     /// `THROTTLE_TAU`. Sim state (not input) — advanced only inside `tick`,
     /// reset for free by the fresh-`Sim`-per-run rule.
@@ -805,9 +799,10 @@ impl Sim {
     /// displacement. Used by the keel editor's Apply.
     pub fn new_with_design(design: &BoatDesign) -> Sim {
         let keel = design.keel.derive();
-        let wetted_surface = wetted_surface_area(&design.keel);
+        let wetted_surface = wetted_surface_area(&design.keel, &design.rudder);
         let hull_length = hull_length();
         let att_flow = attached_flow_coeffs(&design.keel, hull_com_x());
+        let rudder = RudderFoil::from(&design.rudder);
         let mut bodies = RigidBodySet::new();
         let mut colliders = ColliderSet::new();
 
@@ -888,6 +883,7 @@ impl Sim {
             wetted_surface,
             hull_length,
             att_flow,
+            rudder,
             engine: 0.0,
             ticks: 0,
         }
@@ -1096,7 +1092,7 @@ impl Sim {
             let adv = surge * n.signum() / (n.abs() * U_PROP_RACE);
             t_max * n * n.abs() * (1.0 - adv * adv.abs()).clamp(-1.0, 2.0)
         };
-        let prop = pos + fwd * PROP_X;
+        let prop = pos + fwd * (self.rudder.x + PROP_AHEAD_OF_RUDDER);
         let f_thrust = fwd * thrust;
         rb.add_force_at_point(vector![f_thrust.x, f_thrust.y], point![prop.x, prop.y], true);
         // Prop walk (right-handed prop): at heading 0, `side` = port (+y).
@@ -1123,15 +1119,15 @@ impl Sim {
         // paints it (see `keel.rs`), so there's nothing left to
         // double-count, and the blade's resistance to a spin is exactly
         // as stale or as fresh as its actual angle to the actual flow.
-        let flow = Vec2::new(-surge, -(sway + w * RUDDER_X));
-        let rud_pt = pos + fwd * RUDDER_X;
+        let flow = Vec2::new(-surge, -(sway + w * self.rudder.x));
+        let rud_pt = pos + fwd * self.rudder.x;
         // rudder_force is a PURE function of the inflow and the blade angle,
         // in the same local (fwd, side) frame `flow` is already expressed
         // in — it knows nothing about world position/orientation. `tick`
         // owns computing that inflow (surge/sway/yaw-sweep, above) and
         // converting the returned local force into world space to apply it
         // at the right point, below.
-        let f_local = rudder_force(flow, delta);
+        let f_local = rudder_force(flow, delta, &self.rudder);
         let f_rudder = fwd * f_local.x + side * f_local.y;
         rb.add_force_at_point(vector![f_rudder.x, f_rudder.y], point![rud_pt.x, rud_pt.y], true);
         // Prop wash over the blade: motoring ahead the prop's slipstream
@@ -1674,6 +1670,10 @@ mod tests {
 
     #[test]
     fn hard_over_stalls() {
+        // Foil curves are per-design now — probe them on the anchor blade
+        // (the O'Day's, the one with published dimensions).
+        let foil = RudderFoil::from(&BoatDesign::oday_39().rudder);
+        let rudder_lift_drag = |a: f32| rudder_lift_drag(a, &foil);
         // The lift curve: linear below stall, flat-plate above, odd, and
         // folded by π so a backing foil reads the same curve. CL at
         // hard-over (35° => 0.611 rad) sits BELOW the pre-stall peak —
@@ -1699,8 +1699,9 @@ mod tests {
         // hard-coded 1.5 here would quietly re-assert the infinite-plate
         // assumption the ceiling was derived to avoid.
         assert!(
-            cd_90 > RUDDER_CD_MAX * 0.95,
-            "a blade square to the flow should be near its max drag {RUDDER_CD_MAX}, got {cd_90}"
+            cd_90 > foil.cd_max * 0.95,
+            "a blade square to the flow should be near its max drag {}, got {cd_90}",
+            foil.cd_max
         );
 
         // And the behaviour it buys: the INITIAL helm bite. Slammed
@@ -1738,7 +1739,8 @@ mod tests {
         // produce no lift and only the baseline parasitic drag. Flow along
         // +x (pure "surge"), chord angle 0 (helm centered) is the simplest
         // such case.
-        let f = rudder_force(Vec2::new(2.5, 0.0), 0.0);
+        let foil = RudderFoil::from(&BoatDesign::oday_39().rudder);
+        let f = rudder_force(Vec2::new(2.5, 0.0), 0.0, &foil);
         assert!(f.y.abs() < 1e-3, "aligned blade should produce no side force, got {f:?}");
         // Drag pushes the blade WITH the relative flow (a passive object
         // gets carried along by the fluid moving past it), so a small
@@ -1751,7 +1753,7 @@ mod tests {
         // a flow of the same magnitude (delta=0, but the flow itself is
         // purely lateral this time, e.g. a strong yaw sweep with no surge)
         // must produce a far bigger force, not another near-zero.
-        let f_broadside = rudder_force(Vec2::new(0.0, 2.5), 0.0);
+        let f_broadside = rudder_force(Vec2::new(0.0, 2.5), 0.0, &foil);
         assert!(
             f_broadside.length() > f.length() * 5.0,
             "a blade broadside to the flow should push much harder than one \
@@ -1773,7 +1775,8 @@ mod tests {
         // rudder_lift_drag's own stall threshold, the same one `tick` uses.
         let surge = 2.0;
         let w = -0.3; // spinning clockwise
-        let flow = Vec2::new(-surge, -w * RUDDER_X);
+        let rudder_x = BoatDesign::oday_39().rudder.x;
+        let flow = Vec2::new(-surge, -w * rudder_x);
 
         let alpha_mag = |rudder_cmd: f32| {
             let delta = -rudder_cmd * RUDDER_MAX_DEG.to_radians();
