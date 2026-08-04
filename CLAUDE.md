@@ -452,7 +452,12 @@ like Pegasus.
   and the prop-wash foam streaks use `get_time()`); nothing cosmetic may
   feed back into the sim. The wash streaks READ sim state (`sim.engine()`,
   so they fade with the spool lag) and follow the deflected blade ahead /
-  boil forward along the quarters astern; the rudder blade itself is drawn
+  boil forward along the quarters astern — **biased 6:2 to the STARBOARD
+  quarter** (2026-08-04, owner request): the right-handed prop's astern
+  discharge race surfaces on the side opposite the port prop walk, so the
+  boil doubles as the real-world "stern is about to walk port" cue (local
+  −y is starboard — at heading 0 `side` = port = +y, same convention as
+  `PROP_WALK_ASTERN` in sim-core); the rudder blade itself is drawn
   BEFORE the hull fill (root under the counter), swinging by the same
   blade-angle formula sim-core uses.
 - Controls: touch/mouse = drag the dials/sliders + RESET/KEEL buttons;
