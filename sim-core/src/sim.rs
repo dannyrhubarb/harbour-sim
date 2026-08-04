@@ -163,6 +163,32 @@ fn ittc57_cf(re: f32) -> f32 {
     0.075 / (re.log10() - 2.0).powi(2)
 }
 
+/// The boat's centre of mass along the hull (m, boat-local x). Rapier
+/// spreads the design's displacement uniformly over the hull collider
+/// (see `new_with_design`), so the COM is the `HULL_PTS` polygon's area
+/// centroid — a property of the hull outline alone, NOT of the keel
+/// profile, which is why it does not coincide with the keel's centre of
+/// lateral resistance (and shouldn't: the CG↔CLR gap is what turns sway
+/// force into yaw moment). Exposed `pub` so the keel editor can draw the
+/// actual pivot next to the CLR marker; unit-tested against Rapier's own
+/// derived `local_center_of_mass` so this shoelace formula can't silently
+/// drift from what the physics really uses. When the Roadmap's
+/// adjustable-mass-distribution work lands, this stops being a constant
+/// of the hull and must come from the `BoatDesign` instead.
+pub fn hull_com_x() -> f32 {
+    let mut a2 = 0.0f32; // twice the signed area
+    let mut cx6 = 0.0f32; // 6 × area × centroid_x
+    let n = HULL_PTS.len();
+    for i in 0..n {
+        let (x0, y0) = HULL_PTS[i];
+        let (x1, y1) = HULL_PTS[(i + 1) % n];
+        let cross = x0 * y1 - x1 * y0;
+        a2 += cross;
+        cx6 += (x0 + x1) * cross;
+    }
+    cx6 / (3.0 * a2)
+}
+
 /// Hull length (m), read from `HULL_PTS`' own extent — the hull outline is
 /// already the single source of truth for geometry, this just measures it
 /// instead of a separate LOA constant that could drift out of sync.
@@ -981,6 +1007,24 @@ mod tests {
 
     const FULL_AHEAD: InputState = InputState { throttle: 1.0, rudder: 0.0 };
     const FULL_ASTERN: InputState = InputState { throttle: -1.0, rudder: 0.0 };
+
+    #[test]
+    fn hull_com_x_matches_rapiers_derived_centre_of_mass() {
+        // `hull_com_x` re-derives the COM with its own shoelace formula so
+        // the keel editor can draw it without holding a `Sim` — this pins
+        // it to the value Rapier actually pivots the physics around, so
+        // the marker can't silently drift from the real thing (same
+        // visuals-match-physics rule as HULL_PTS itself).
+        let sim = Sim::new();
+        let com = sim.bodies[sim.boat].local_center_of_mass();
+        assert!(
+            (com.x - hull_com_x()).abs() < 1e-3,
+            "shoelace centroid {} vs Rapier's local COM {}",
+            hull_com_x(),
+            com.x
+        );
+        assert!(com.y.abs() < 1e-3, "a symmetric hull's COM must be on the centreline, got {}", com.y);
+    }
 
     #[test]
     fn calm_water_boat_stays_put() {

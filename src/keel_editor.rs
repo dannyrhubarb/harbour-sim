@@ -12,7 +12,9 @@
 
 use harbour_sim_core::boat::BoatDesign;
 use harbour_sim_core::keel::KeelProfile;
-use harbour_sim_core::sim::{yaw_damping_coefficient, RUDDER_CHORD, RUDDER_DEPTH, RUDDER_X};
+use harbour_sim_core::sim::{
+    hull_com_x, yaw_damping_coefficient, RUDDER_CHORD, RUDDER_DEPTH, RUDDER_X,
+};
 use macroquad::prelude::*;
 
 /// Fixed control-point x positions (hull-local metres, bow positive),
@@ -428,6 +430,21 @@ impl KeelEditor {
             Color::from_rgba(255, 170, 60, 255),
         );
         draw_text("CLR", clr_x + 4.0 * ui, canvas.y + 16.0 * ui, fs * 0.65, Color::from_rgba(255, 170, 60, 255));
+
+        // Centre of gravity marker — the hull polygon's centroid
+        // (`sim::hull_com_x`, the same COM Rapier derives from the uniform
+        // hull spread, unit-tested against it). Deliberately a SEPARATE
+        // marker from the CLR: the two do not coincide (the CLR follows
+        // the painted keel curve, the CG follows only the hull outline),
+        // and their gap is exactly the lever arm that turns sway drag
+        // into yaw moment. Label at the canvas BOTTOM so it can't collide
+        // with CLR's top label when the lines sit close together.
+        let cg_col = Color::from_rgba(150, 230, 130, 255);
+        let cg_t = ((hull_com_x() + 6.0) / 12.0).clamp(0.0, 1.0);
+        let cg_x = canvas.x + canvas.w * cg_t;
+        draw_line(cg_x, canvas.y, cg_x, canvas.y + canvas.h, 2.0, cg_col);
+        draw_circle_lines(cg_x, canvas.y + canvas.h - 26.0 * ui, 5.0 * ui, 1.5, cg_col);
+        draw_text("CG", cg_x + 4.0 * ui, canvas.y + canvas.h - 8.0 * ui, fs * 0.65, cg_col);
 
         // Live readout. Area stays the real geometric total (m², sanity-
         // checkable against a published keel area); CLR/yaw damping use
