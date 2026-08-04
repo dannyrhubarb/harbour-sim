@@ -94,32 +94,36 @@ impl BoatDesign {
     /// 8,500 kg, ballast ratio ≈44% (encapsulated iron). The curve: a
     /// longish fin (root chord ≈2.4 m) just aft of the hull centre at the
     /// full 1.75 m draft, a marked skeg ahead of the rudder post, and a
-    /// canoe body fading to nothing at the bow — net area ≈9.8 m², CLR
-    /// ≈0.7 m aft of centre (close to the retired hand-tuned default:
+    /// canoe body fading to nothing at the bow — net area ≈8.4 m², CLR
+    /// ≈0.6 m aft of centre (close to the retired hand-tuned default:
     /// area 11.9 m², CLR −0.87 m), aft-biased enough to weathervane.
     pub fn hallberg_rassy_38() -> BoatDesign {
         BoatDesign {
             keel: KeelProfile {
                 points: vec![
-                    Vec2::new(-6.0, 0.3),
-                    Vec2::new(-5.4, 1.1), // skeg ahead of the rudder post
-                    Vec2::new(-4.8, 0.6),
+                    Vec2::new(-6.0, 0.0),
+                    Vec2::new(-4.8, 0.0), // aft waterline ending (LWL 9.50 m of 11.58 LOA)
+                    Vec2::new(-4.75, 0.3),
+                    Vec2::new(-4.35, 1.1), // skeg ahead of the rudder post
+                    Vec2::new(-3.9, 0.6),
                     Vec2::new(-2.2, 0.6),
                     Vec2::new(-1.8, 1.75), // fin, at the real 1.75 m draft
                     Vec2::new(0.6, 1.75),
                     Vec2::new(1.0, 0.6),
-                    Vec2::new(4.5, 0.45),
+                    Vec2::new(3.6, 0.45),
+                    Vec2::new(4.7, 0.0), // forward waterline ending
                     Vec2::new(6.0, 0.0),
                 ],
             },
             // Skeg-hung blade immediately abaft this preset's own painted
-            // skeg (the −5.4 bump above): moderate dimensions read from
-            // the boat's profile drawing against its 1.75 m draft — blade
-            // ≈0.74 m², ≈7% of the total lateral plane, the low blade
-            // fraction a skeg boat should have (the skeg itself is fixed
-            // area, already painted in the curve). Root end-plated by
-            // hull + skeg.
-            rudder: RudderDesign { x: -5.7, chord: 0.55, depth: 1.35, root_endplated: true },
+            // skeg (the −4.35 bump above), trailing edge reaching the aft
+            // waterline ending: moderate dimensions read from the boat's
+            // profile drawing against its 1.75 m draft — blade ≈0.74 m²,
+            // ≈7% of the total lateral plane, the low blade fraction a
+            // skeg boat should have (the skeg itself is fixed area,
+            // already painted in the curve). Root end-plated by hull +
+            // skeg.
+            rudder: RudderDesign { x: -4.6, chord: 0.55, depth: 1.35, root_endplated: true },
             displacement_kg: 8_500.0,
         }
     }
@@ -134,7 +138,7 @@ impl BoatDesign {
     /// LOA ≈12.0 m, LWL 10.21 m, beam 3.83 m, draft 1.93 m (standard
     /// keel), displacement 18,000 lb ≈ 8,165 kg, ballast 2,994 kg. The
     /// curve: a short fin at the full 1.93 m draft over a thin canoe-body
-    /// baseline — net area ≈7.1 m², the smallest of the presets, which is
+    /// baseline — net area ≈6.6 m², among the smallest of the presets, which is
     /// the point of a fin keel: concentrating the area near the pivot
     /// trades away yaw damping (cubic in distance) much faster than area.
     ///
@@ -147,13 +151,16 @@ impl BoatDesign {
         BoatDesign {
             keel: KeelProfile {
                 points: vec![
-                    Vec2::new(-6.0, 0.1),
+                    Vec2::new(-6.0, 0.0),
+                    Vec2::new(-5.2, 0.0), // aft waterline ending (LWL 10.21 m of ~12.0 LOA)
+                    Vec2::new(-5.15, 0.1),
                     Vec2::new(-1.7, 0.55),
                     Vec2::new(-1.4, 1.93), // fin, at the real 1.93 m draft
                     Vec2::new(0.2, 1.93),
                     Vec2::new(0.5, 0.55),
                     Vec2::new(3.5, 0.35),
-                    Vec2::new(5.5, 0.1),
+                    Vec2::new(4.7, 0.1),
+                    Vec2::new(5.0, 0.0), // forward waterline ending
                     Vec2::new(6.0, 0.0),
                 ],
             },
@@ -162,16 +169,10 @@ impl BoatDesign {
             // tapering 28 in head to 20 in tip, mean ≈0.61 m — 0.93 m²,
             // ≈11.6% of the total lateral plane (the ~10% rule of thumb's
             // independent cross-check). Position: a spade stands just
-            // inside the aft end of the WATERLINE — and `HULL_PTS` is the
-            // modeled waterline (every strip integral reads it as such;
-            // the sim has no overhang concept), so the mapping is in
-            // waterline space: blade centre ≈0.4 m inside the −5.9 stern
-            // ending → −5.5, trailing edge just clear of the tip. (An
-            // LOA-space mapping would put it at −5.1, double-counting the
-            // stern overhang the model doesn't have; the pre-2026-08-04
-            // shared constant at −5.9 was the other extreme — blade
-            // centre ON the tip, transom-hung geometry.)
-            rudder: RudderDesign { x: -5.5, chord: 0.61, depth: 1.52, root_endplated: true },
+            // inside the aft end of the waterline — which, since the
+            // profiles carry real overhangs, is the curve's own aft
+            // ending at −5.2: trailing edge there, centre at −4.9.
+            rudder: RudderDesign { x: -4.9, chord: 0.61, depth: 1.52, root_endplated: true },
             displacement_kg: 8_165.0,
         }
     }
@@ -190,7 +191,7 @@ impl BoatDesign {
     /// mast), over a MARKEDLY shallower canoe body than the older boats —
     /// the modern flat underbody carries only ~0.4 m of lateral depth
     /// amidships and runs out to a shallow, wide stern with no skeg. Net
-    /// area ≈5.5 m², the smallest of the presets, with the least yaw
+    /// area ≈5.4 m², the smallest of the presets, with the least yaw
     /// damping — despite drawing LESS water than the O'Day (1.80 m vs
     /// 1.93 m): the agility comes from stripping lateral plane off the
     /// hull ends, not from a deeper fin.
@@ -199,13 +200,15 @@ impl BoatDesign {
             keel: KeelProfile {
                 points: vec![
                     Vec2::new(-6.0, 0.0),
-                    Vec2::new(-5.2, 0.12), // shallow run under the wide stern
+                    Vec2::new(-5.05, 0.0), // aft waterline ending (LWL 10.01 m of 11.90 LOA)
+                    Vec2::new(-5.0, 0.12), // shallow run under the wide stern
                     Vec2::new(-1.6, 0.38),
                     Vec2::new(-1.3, 1.8), // fin, at the real 1.80 m draft
                     Vec2::new(0.1, 1.8),
                     Vec2::new(0.4, 0.42),
                     Vec2::new(3.2, 0.32),
-                    Vec2::new(5.4, 0.08), // bow overhang fade
+                    Vec2::new(4.6, 0.08),
+                    Vec2::new(4.95, 0.0), // forward waterline ending
                     Vec2::new(6.0, 0.0),
                 ],
             },
@@ -216,8 +219,9 @@ impl BoatDesign {
             // highest aspect ratio of the four (AR ≈ 5.5): the modern
             // pattern of a big, deep, high-slope blade doing
             // proportionally more of the boat's steering and tracking.
-            // Same waterline-space spade position argument as the O'Day.
-            rudder: RudderDesign { x: -5.5, chord: 0.60, depth: 1.65, root_endplated: true },
+            // Same spade position rule as the O'Day: trailing edge at the
+            // curve's own aft waterline ending (−5.05), centre −4.75.
+            rudder: RudderDesign { x: -4.75, chord: 0.60, depth: 1.65, root_endplated: true },
             displacement_kg: 8_000.0,
         }
     }
@@ -233,7 +237,7 @@ impl BoatDesign {
     /// displacement 26,000 lb ≈ 11,800 kg, ballast 4,536 kg lead. The
     /// curve: a cutaway forefoot deepening steadily aft, carrying nearly
     /// the full 1.83 m draft along the whole aft body to the heel at the
-    /// rudder post — net area ≈15 m², double the O'Day's, spread far from
+    /// rudder post — net area ≈13.2 m², double the O'Day's, spread far from
     /// the pivot. Shallower than the fin boats despite far more keel:
     /// long keels spread their area along the hull instead of down. The
     /// classic full-keel package deal is also ~40% more displacement at
@@ -242,25 +246,32 @@ impl BoatDesign {
         BoatDesign {
             keel: KeelProfile {
                 points: vec![
-                    Vec2::new(-6.0, 1.75), // heel, at the rudder post
+                    Vec2::new(-6.0, 0.0),
+                    Vec2::new(-5.12, 0.0), // aft waterline ending (LWL 9.93 m of 11.58 LOA)
+                    Vec2::new(-5.1, 1.75), // sternpost CLIFF: the deadwood keeps full
+                    // draught to the very end and cuts off vertically — a full
+                    // keel's waterline does NOT fade to zero aft, and the
+                    // profile represents that as a (near-)vertical segment.
                     Vec2::new(-2.0, 1.83), // deepest point of the 1.83 m draft
                     Vec2::new(1.0, 1.4),
-                    Vec2::new(3.5, 0.7), // cutaway forefoot
-                    Vec2::new(5.0, 0.2),
+                    Vec2::new(3.0, 0.7), // cutaway forefoot
+                    Vec2::new(4.4, 0.2),
+                    Vec2::new(4.83, 0.0), // forward waterline ending
                     Vec2::new(6.0, 0.0),
                 ],
             },
-            // Transom-hung outboard blade at the hull's very tip, running
-            // down the sternpost behind the keel heel (the profile's
-            // −6.0/1.75 point): long and moderate-chord, ≈0.85 m² but
-            // only ≈5% of this boat's big lateral plane — a full keel
-            // does the tracking itself and needs proportionally little
-            // rudder. NOT root-end-plated: the blade hangs on the transom
-            // and breaks the surface, so there's no hull above the root
-            // to mirror it — effective AR ≈ 2.8 (vs ≈5 for the spades),
-            // the honest reason a barn-door rudder feels mushier per
-            // square metre than a spade.
-            rudder: RudderDesign { x: -5.9, chord: 0.55, depth: 1.55, root_endplated: false },
+            // Transom-hung outboard blade hanging BEHIND the sternpost
+            // cliff (the profile's −5.1 ending): leading edge on the
+            // post, the blade entirely abaft the waterline ending, as an
+            // outboard rudder really hangs. ≈0.85 m² but only ≈5% of
+            // this boat's big lateral plane — a full keel does the
+            // tracking itself and needs proportionally little rudder.
+            // NOT root-end-plated: the blade breaks the surface with air
+            // above the root, so there's no plate to mirror it —
+            // effective AR ≈ 2.8 (vs ≈5 for the spades), the honest
+            // reason a barn-door rudder feels mushier per square metre
+            // than a spade.
+            rudder: RudderDesign { x: -5.38, chord: 0.55, depth: 1.55, root_endplated: false },
             displacement_kg: 11_800.0,
         }
     }

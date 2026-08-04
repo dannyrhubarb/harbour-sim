@@ -189,9 +189,51 @@ pub fn hull_com_x() -> f32 {
     cx6 / (3.0 * a2)
 }
 
-/// Hull length (m), read from `HULL_PTS`' own extent — the hull outline is
-/// already the single source of truth for geometry, this just measures it
-/// instead of a separate LOA constant that could drift out of sync.
+/// The waterline extent [aft, fwd] (m) of a keel profile: the range over
+/// which the curve is nonzero — the profile IS the underwater body, so
+/// where it is zero the boat is out of the water (overhangs). Since
+/// 2026-08-04 the preset curves carry their boats' real overhangs (zero
+/// tails at both ends; the full keeler's sternpost is a vertical CLIFF to
+/// zero, so its waterline legitimately ends at full draught — the support
+/// convention handles that without a separate per-design constant).
+/// Zero-crossings of the piecewise-linear curve are interpolated exactly.
+/// Falls back to the full hull extent for a degenerate all-zero profile
+/// (keeps Reynolds/Froude finite while the editor paints from scratch).
+fn waterline_extent(profile: &KeelProfile) -> (f32, f32) {
+    let (hull_aft, hull_fwd) = HULL_PTS
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(lo, hi), &(x, _)| (lo.min(x), hi.max(x)));
+    let mut aft = f32::MAX;
+    let mut fwd = f32::MIN;
+    for w in profile.points.windows(2) {
+        let (x0, a0) = (w[0].x, w[0].y);
+        let (x1, a1) = (w[1].x, w[1].y);
+        if a0 <= 0.0 && a1 <= 0.0 {
+            continue;
+        }
+        // Segment carries area: its wet sub-range is bounded by any
+        // zero-crossing inside it. The crossing formula is only evaluated
+        // when exactly one endpoint is non-positive, so a0 != a1 there.
+        let cross = || x0 + (x1 - x0) * (-a0) / (a1 - a0);
+        let lo = if a0 <= 0.0 { cross() } else { x0 };
+        let hi = if a1 <= 0.0 { cross() } else { x1 };
+        aft = aft.min(lo);
+        fwd = fwd.max(hi);
+    }
+    if aft >= fwd {
+        (hull_aft, hull_fwd)
+    } else {
+        (aft.max(hull_aft), fwd.min(hull_fwd))
+    }
+}
+
+/// Hull length (m), read from `HULL_PTS`' own extent — the boat's LOA
+/// (deck/collision length). The HYDRODYNAMIC length is the per-design
+/// waterline length (`waterline_extent`), which is what all the physics
+/// uses since 2026-08-04; this LOA measure remains only as the tests'
+/// "boat length" yardstick (turn distances quoted in boat lengths mean
+/// lengths of the boat you can see, not of its waterline).
+#[cfg(test)]
 fn hull_length() -> f32 {
     let (lo, hi) = HULL_PTS
         .iter()
@@ -239,9 +281,11 @@ fn hull_half_beam(x: f32) -> f32 {
 fn wetted_surface_area(profile: &KeelProfile, rudder: &RudderDesign) -> f32 {
     const SUBSTEPS: usize = 64;
     use std::f32::consts::FRAC_PI_2;
-    let (x0, x1) = HULL_PTS
-        .iter()
-        .fold((f32::MAX, f32::MIN), |(lo, hi), &(x, _)| (lo.min(x), hi.max(x)));
+    // Integrate over the WATERLINE extent only (2026-08-04): outside it
+    // the boat is overhang — hull in the air, not wetted. Before the
+    // profiles carried real overhangs this ran over the full hull extent,
+    // silently counting phantom wetted area over the dry ends.
+    let (x0, x1) = waterline_extent(profile);
     let girth = |x: f32| FRAC_PI_2 * (hull_half_beam(x) + profile.sample(x));
     let dx = (x1 - x0) / SUBSTEPS as f32;
     let mut wsa = 0.0f32;
@@ -752,9 +796,13 @@ pub struct Sim {
     /// keel profile at construction — see `wetted_surface_area`. Feeds the
     /// ITTC-1957 axial friction term in `tick`.
     wetted_surface: f32,
-    /// Hull length (m), read from `HULL_PTS` once at construction — the
-    /// Reynolds number in `tick`'s axial friction term needs it every tick,
-    /// cheaper to cache than refold `HULL_PTS` each time.
+    /// The design's WATERLINE length (m), from the keel profile's nonzero
+    /// support at construction (`waterline_extent`) — the hydrodynamic
+    /// length that Reynolds number, Froude number and hull speed are
+    /// defined against. Per-design since 2026-08-04: an HR 38's 9.5 m
+    /// waterline and an O'Day's 10.2 m now motor like different boats
+    /// (hull speed scales with √LWL), where previously every design ran
+    /// on the shared 11.9 m outline length.
     hull_length: f32,
     /// Attached-flow (lifting) lateral coefficients — integrated once from
     /// the keel profile at construction, see `attached_flow_coeffs` and the
@@ -800,7 +848,8 @@ impl Sim {
     pub fn new_with_design(design: &BoatDesign) -> Sim {
         let keel = design.keel.derive();
         let wetted_surface = wetted_surface_area(&design.keel, &design.rudder);
-        let hull_length = hull_length();
+        let (wl_aft, wl_fwd) = waterline_extent(&design.keel);
+        let hull_length = wl_fwd - wl_aft;
         let att_flow = attached_flow_coeffs(&design.keel, hull_com_x());
         let rudder = RudderFoil::from(&design.rudder);
         let mut bodies = RigidBodySet::new();
@@ -1274,6 +1323,38 @@ mod tests {
             "expected 90° within 3 boat lengths, got {:.0}° after {:.1} m",
             dpsi.to_degrees().abs(),
             dist
+        );
+    }
+
+    #[test]
+    fn waterline_extent_reads_each_presets_real_lwl() {
+        // The profile's nonzero support IS the waterline (overhangs paint
+        // zero), including the full keeler's sternpost cliff — its
+        // waterline ends at full draught, which the support convention
+        // handles without a per-design constant. Values are the boats'
+        // published LWLs (docs/reference-boats.md).
+        for (design, lwl, name) in [
+            (BoatDesign::hallberg_rassy_38(), 9.50, "Hallberg-Rassy 38"),
+            (BoatDesign::oday_39(), 10.21, "O'Day 39"),
+            (BoatDesign::elan_impression_394(), 10.01, "Elan Impression 394"),
+            (BoatDesign::alajuela_38(), 9.93, "Alajuela 38"),
+        ] {
+            let (aft, fwd) = waterline_extent(&design.keel);
+            let got = fwd - aft;
+            assert!(
+                (got - lwl).abs() < 0.08,
+                "{name}: waterline length {got:.2} m vs published LWL {lwl} m"
+            );
+        }
+        // And the cliff case explicitly: the Alajuela's aft ending sits at
+        // full draught (the deadwood cuts off vertically), not at a fade
+        // to zero.
+        let alajuela = BoatDesign::alajuela_38();
+        let (aft, _) = waterline_extent(&alajuela.keel);
+        assert!(
+            alajuela.keel.sample(aft + 0.05) > 1.5,
+            "the full keeler's waterline must end at full draught, got {} m just inside",
+            alajuela.keel.sample(aft + 0.05)
         );
     }
 

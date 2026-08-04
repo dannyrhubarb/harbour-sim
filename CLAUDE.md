@@ -245,6 +245,28 @@ like Pegasus.
   conventions below) are all sized for the one ship type in service: a
   small cruising sailboat. See **Ship types** under Roadmap for how a
   second type would be added.
+- **Waterline vs LOA** (2026-08-04): `HULL_PTS` is the boat's DECK
+  outline — collision shape, windage, rendering, mass spread (LOA ~12 m).
+  The UNDERWATER body is the keel profile alone, and since 2026-08-04
+  the preset curves carry their boats' real overhangs: zero draught over
+  the dry ends, so the curve's nonzero support IS the waterline
+  (`waterline_extent` in sim.rs — zero-crossings interpolated exactly;
+  the Alajuela's deadwood ends in a vertical CLIFF at full draught, which
+  the support convention handles without any per-design constant, and
+  `waterline_extent_reads_each_presets_real_lwl` pins all four published
+  LWLs). Everything hydrodynamic that needs a length reads the design's
+  waterline length (Reynolds, Froude/hull speed, wave resistance), and
+  `wetted_surface_area` integrates over the wet range only — before this,
+  every design motored like an 11.9 m-waterline boat and carried phantom
+  wetted area over its dry overhangs. Measured consequences (28 hp, full
+  throttle): HR 38 (LWL 9.50) 6.5 kn, O'Day 39 (10.21) 6.7, Elan I394
+  (10.01) 6.7, Alajuela 38 (9.93, 11.8 t) 6.0 — each ~85% of its own
+  hull speed, the heavy short-waterline full keeler honestly slowest.
+  Offline 3→1 kn coasting: 119 m (HR) to 138 m (Alajuela — heavy boats
+  carry their way), vs ~99 m when the shared outline length was doing
+  this job; still matching the "real boats are above 1 kn past 100 m"
+  benchmark that motivated the ITTC rewrite. `hull_length()` (the LOA
+  measure) survives only as the tests' boat-length yardstick.
 - **Env** (`wind_from_deg`, `wind_speed`, `current_to_deg`, `current_speed`):
   compass convention 0° = north = +y, 90° = east = +x. Wind is named by
   where it blows FROM (mariners' convention), current by where it sets
@@ -283,10 +305,16 @@ like Pegasus.
   boat. Each preset carries its real boat's blade — the O'Day's
   replacement-listing dimensions are the anchor, the others derived from
   type + profile + the %-of-lateral-plane cross-check, all documented in
-  boat.rs / reference-boats.md. Blade POSITIONS map in WATERLINE space
-  because `HULL_PTS` *is* the modeled waterline — an LOA-space mapping
-  double-counts overhangs the model doesn't have (found live: it moved
-  the O'Day spade to −5.1 and the coast turn collapsed). A transom-hung
+  boat.rs / reference-boats.md. Blade POSITIONS sit relative to each
+  design's own waterline endings — since the profiles carry real
+  overhangs (see the Waterline bullet below), a spade's trailing edge
+  stands at the curve's own aft ending, and the Alajuela's outboard
+  blade hangs entirely ABAFT its sternpost cliff. (Historical gotcha,
+  2026-08-04: while `HULL_PTS` still doubled as the waterline, mapping
+  the O'Day spade by LOA double-counted the overhang and collapsed the
+  coast turn — position mappings are only meaningful against a
+  consistent waterline, which is what motivated the waterline refactor.)
+  A transom-hung
   blade's root breaks the surface with air above it → NO end-plate
   mirror, AR = depth/chord not 2×, which is why the Alajuela's barn door
   is mushier per m² than the spades. The editor draws the loaded design's
@@ -464,9 +492,10 @@ like Pegasus.
     checks a basin-safe slice of the actual benchmark (the ±40 m harbour
     basin, plus the hull's own 6 m bow overhang, means a real 100 m
     straight-line run hits the wall around 34 m — full-scale verification
-    of the 3→1 kn distance (~99 m, matching the ~100 m benchmark closely)
-    was done by integrating the real `tick()` formula offline, not inside
-    `Sim`).
+    of the 3→1 kn distance was done by integrating the real `tick()`
+    formula offline, not inside `Sim`: ~99 m originally on the shared
+    11.9 m outline length; 119–138 m per boat since the per-design
+    waterline refactor, see the Waterline bullet).
   - **What fixing this correctly EXPOSED**: full-throttle equilibrium
     initially came out to ~4.85 m/s (9.4 kn) — above this hull's classic
     displacement hull speed (~8.4 kn), not achievable on 28 hp in reality.
@@ -508,11 +537,14 @@ like Pegasus.
   fitted to this boat's own target behaviour): `Rw/Δ ~ 0.001` (negligible)
   at `Fn=0.20`, `Rw/Δ ~ 0.12` (dominant) at `Fn=0.42` (~hull speed).
   **Consistency check, not a target**: solving those two constants and
-  re-running the equilibrium lands full-throttle at 6.3 kn — close to the
+  re-running the equilibrium landed full-throttle at 6.3 kn — close to the
   ~6.2 kn this sim's engine sizing always assumed (`T_BOLLARD_AHEAD`'s
-  comment), without that number being an input anywhere in the derivation.
-  Verified the low-speed coasting benchmark stays undisturbed too (still
-  ~99 m, Cw is negligible at 1–3 kn / Fn~0.05–0.15) —
+  comment), without that number being an input anywhere in the derivation
+  (with per-design waterlines the equilibria are 6.0–6.7 kn per boat —
+  see the Waterline bullet).
+  Verified the low-speed coasting benchmark stays undisturbed too (Cw is
+  negligible at 1–3 kn / Fn~0.05–0.15, so the 119–138 m per-boat
+  distances in the Waterline bullet are set by friction alone) —
   `wave_resistance_is_negligible_at_low_speed_and_dominant_near_hull_speed`
   locks in both ends plus monotonicity. **Upgrade path, written down so it
   isn't lost**: replace `Cw(Fn)` with the real DSYHS regression once its
@@ -644,7 +676,9 @@ like Pegasus.
   geometry — the old position read as too far forward), and each preset
   carries its boat's real displacement. Consequence of honest end-fading
   curves: the default's yaw damping dropped from ≈353k to ≈182k
-  N·m/(rad/s)² (the old hand-tuned curve painted 0.7–1.0 m of draught at
+  N·m/(rad/s)² (both in that comparison's flat-Cd, full-outline metric;
+  today's Cd-weighted figure on the real waterline is 75k — see
+  reference-boats.md) (the old hand-tuned curve painted 0.7–1.0 m of draught at
   the extreme hull ends, which the cubic weighting amplifies) — the live
   rudder foil provides the rest of the spin resistance, as it should.
   **The rudder is no longer part of any preset** (2026-08-03) — the old
