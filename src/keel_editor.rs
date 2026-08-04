@@ -1,12 +1,16 @@
 //! In-app keel design editor: drag a bar-chart-style curve of underwater
-//! lateral area per unit length along the hull, see the derived
-//! hydrodynamic constants (area, centre of lateral resistance, yaw damping)
-//! update live, and apply the result to a fresh `Sim`.
+//! lateral area per unit length along the hull, drag a displacement
+//! slider, see the derived hydrodynamic constants (area, centre of lateral
+//! resistance, yaw damping) update live, and apply the result to a fresh
+//! `Sim`. The three preset buttons load real reference boats' designs
+//! (curve AND weight together — see `boat.rs` / `docs/reference-boats.md`).
 //!
-//! Frontend-only (macroquad) — the editor manipulates a `KeelProfile` value
-//! and hands it to `Sim::new_with_keel`; nothing here reaches into physics
-//! outside a full respawn, keeping the "fresh Sim per run" determinism rule.
+//! Frontend-only (macroquad) — the editor manipulates a `BoatDesign` value
+//! and hands it to `Sim::new_with_design`; nothing here reaches into
+//! physics outside a full respawn, keeping the "fresh Sim per run"
+//! determinism rule.
 
+use harbour_sim_core::boat::BoatDesign;
 use harbour_sim_core::keel::KeelProfile;
 use harbour_sim_core::sim::{yaw_damping_coefficient, RUDDER_CHORD, RUDDER_DEPTH, RUDDER_X};
 use macroquad::prelude::*;
@@ -28,6 +32,15 @@ const EDIT_XS: [f32; 49] = [
 const MAX_AREA_PER_LEN: f32 = 4.0;
 const HULL_HALF_LEN: f32 = 6.0;
 
+/// Displacement slider range (kg): brackets the real boats the presets
+/// come from — modern fin 39-footers start near 4.8 t, traditional
+/// full-keel 38s run past 12 t (see `docs/reference-boats.md`).
+const DISPL_MIN_KG: f32 = 4_000.0;
+const DISPL_MAX_KG: f32 = 14_000.0;
+/// Slider quantisation (kg) — same idea as the HUD dials' 1/20 steps:
+/// coarse enough to be reproducible by hand, fine enough to not matter.
+const DISPL_STEP_KG: f32 = 100.0;
+
 pub enum EditorAction {
     None,
     Apply,
@@ -37,6 +50,9 @@ pub enum EditorAction {
 pub struct KeelEditor {
     pub active: bool,
     ys: [f32; EDIT_XS.len()],
+    /// Displacement (kg) — edited by the slider / Up-Down keys, loaded and
+    /// applied together with the curve (a preset is a whole boat design).
+    displacement_kg: f32,
     /// Touch id + position seen last frame — lets button taps use the same
     /// fresh-touch detection as the HUD dials, and lets drag painting fill
     /// in the columns between two frames' samples instead of leaving gaps
@@ -45,32 +61,64 @@ pub struct KeelEditor {
     /// Mouse position last frame while the button was held, for the same
     /// gap-filling reason on a mouse drag.
     mouse_drag_prev: Option<Vec2>,
+    /// True while a held mouse button is claimed by the displacement
+    /// slider — the same one-claim-per-control idea as the HUD's
+    /// `mouse_claim`: a drag that starts on the slider must keep driving
+    /// the slider even when it sweeps across the curve canvas, not start
+    /// painting bars mid-drag.
+    mouse_on_weight: bool,
+    /// Touch id claimed by the displacement slider, same rule as above
+    /// (and the same recycled-id `Started` re-check as the HUD dials).
+    weight_touch: Option<u64>,
 }
 
 impl KeelEditor {
-    pub fn new(initial: &KeelProfile) -> Self {
+    pub fn new(initial: &BoatDesign) -> Self {
         let mut editor = KeelEditor {
             active: false,
             ys: [0.0; EDIT_XS.len()],
+            displacement_kg: DISPL_MIN_KG,
             prev_touches: Vec::new(),
             mouse_drag_prev: None,
+            mouse_on_weight: false,
+            weight_touch: None,
         };
-        editor.load(initial);
+        editor.load_design(initial);
         editor
     }
 
-    /// Resample any profile onto this editor's fixed grid (used both for
-    /// the initial hull and for loading a preset).
-    pub fn load(&mut self, profile: &KeelProfile) {
+    /// Load a whole design: curve resampled onto the fixed grid AND the
+    /// displacement. Used for the initial boat, reopening the editor on
+    /// the current design, and the preset buttons.
+    pub fn load_design(&mut self, design: &BoatDesign) {
+        self.load(&design.keel);
+        self.displacement_kg = design.displacement_kg.clamp(DISPL_MIN_KG, DISPL_MAX_KG);
+    }
+
+    /// Resample any profile onto this editor's fixed grid.
+    fn load(&mut self, profile: &KeelProfile) {
         for (y, &x) in self.ys.iter_mut().zip(EDIT_XS.iter()) {
             *y = profile.sample(x).clamp(0.0, MAX_AREA_PER_LEN);
         }
     }
 
-    pub fn profile(&self) -> KeelProfile {
+    /// The design as currently edited — what Apply hands to
+    /// `Sim::new_with_design`.
+    pub fn design(&self) -> BoatDesign {
+        BoatDesign { keel: self.profile(), displacement_kg: self.displacement_kg }
+    }
+
+    fn profile(&self) -> KeelProfile {
         KeelProfile {
             points: EDIT_XS.iter().zip(self.ys).map(|(&x, y)| vec2(x, y)).collect(),
         }
+    }
+
+    /// Map a screen x on the slider track to a quantised displacement.
+    fn set_weight_from(&mut self, track: Rect, px: f32) {
+        let t = ((px - track.x) / track.w).clamp(0.0, 1.0);
+        let kg = DISPL_MIN_KG + t * (DISPL_MAX_KG - DISPL_MIN_KG);
+        self.displacement_kg = (kg / DISPL_STEP_KG).round() * DISPL_STEP_KG;
     }
 
     /// Paint every column between `prev` and `cur` (screen px), linearly
@@ -108,36 +156,46 @@ impl KeelEditor {
     }
 
     /// A click/tap at `p` (screen px) on one of the five buttons, if any.
-    /// Shared by mouse-click and touch-tap.
-    fn button_at(&mut self, buttons: EditorButtons, p: Vec2) -> EditorAction {
-        if buttons.default.contains(p) {
-            self.load(&KeelProfile::default_sailboat());
-        } else if buttons.fin.contains(p) {
-            self.load(&KeelProfile::fin_keel());
-        } else if buttons.long.contains(p) {
-            self.load(&KeelProfile::long_keel());
-        } else if buttons.apply.contains(p) {
+    /// Shared by mouse-click and touch-tap. The preset buttons load the
+    /// whole design — curve AND displacement — because each is a real
+    /// boat, not just a keel shape.
+    fn button_at(&mut self, layout: EditorLayout, p: Vec2) -> EditorAction {
+        if layout.hr38.contains(p) {
+            self.load_design(&BoatDesign::hallberg_rassy_38());
+        } else if layout.oday.contains(p) {
+            self.load_design(&BoatDesign::oday_39());
+        } else if layout.alajuela.contains(p) {
+            self.load_design(&BoatDesign::alajuela_38());
+        } else if layout.apply.contains(p) {
             return EditorAction::Apply;
-        } else if buttons.cancel.contains(p) {
+        } else if layout.cancel.contains(p) {
             return EditorAction::Cancel;
         }
         EditorAction::None
     }
 
     /// Handle mouse/touch/keyboard input for one frame. `canvas` is the
-    /// graph area in screen pixels; `buttons` are the (default, fin, long,
-    /// apply, cancel) button rects, also in screen pixels.
-    pub fn update(&mut self, canvas: Rect, buttons: EditorButtons) -> EditorAction {
+    /// graph area in screen pixels; `layout` carries the button rects and
+    /// the displacement slider track, also in screen pixels.
+    pub fn update(&mut self, canvas: Rect, layout: EditorLayout) -> EditorAction {
         let (mx, my) = mouse_position();
         let cur = vec2(mx, my);
+        if is_mouse_button_pressed(MouseButton::Left) && layout.weight.contains(cur) {
+            self.mouse_on_weight = true;
+        }
         if is_mouse_button_down(MouseButton::Left) {
-            self.drag_fill(canvas, self.mouse_drag_prev.unwrap_or(cur), cur);
-            self.mouse_drag_prev = Some(cur);
+            if self.mouse_on_weight {
+                self.set_weight_from(layout.weight, cur.x);
+            } else {
+                self.drag_fill(canvas, self.mouse_drag_prev.unwrap_or(cur), cur);
+                self.mouse_drag_prev = Some(cur);
+            }
         } else {
+            self.mouse_on_weight = false;
             self.mouse_drag_prev = None;
         }
         if is_mouse_button_pressed(MouseButton::Left) {
-            let action = self.button_at(buttons, cur);
+            let action = self.button_at(layout, cur);
             if !matches!(action, EditorAction::None) {
                 return action;
             }
@@ -159,30 +217,58 @@ impl KeelEditor {
             // touch also has no real "previous" drag position, so its fill
             // degenerates to painting just the one column under it.
             let fresh = prev_pos.is_none() || t.phase == TouchPhase::Started;
-            self.drag_fill(canvas, prev_pos.unwrap_or(p), p);
+            // Slider claim: a fresh touch landing on the track owns the
+            // slider until it lifts; a recycled id starting elsewhere
+            // (`Started` on an already-claimed id = new finger) drops a
+            // stale claim — the same rules as the HUD dials.
+            if fresh {
+                if layout.weight.contains(p) {
+                    self.weight_touch = Some(t.id);
+                } else if self.weight_touch == Some(t.id) {
+                    self.weight_touch = None;
+                }
+            }
+            if self.weight_touch == Some(t.id) {
+                self.set_weight_from(layout.weight, p.x);
+            } else {
+                self.drag_fill(canvas, prev_pos.unwrap_or(p), p);
+            }
             next_prev_touches.push((t.id, p));
             if fresh {
-                let action = self.button_at(buttons, p);
+                let action = self.button_at(layout, p);
                 if !matches!(action, EditorAction::None) {
                     touch_action = action;
                 }
             }
         }
         self.prev_touches = next_prev_touches;
+        if self.weight_touch.is_some_and(|id| !ts.iter().any(|t| t.id == id)) {
+            self.weight_touch = None;
+        }
         if !matches!(touch_action, EditorAction::None) {
             return touch_action;
         }
 
-        // D is helm-to-starboard in the game, but the editor freezes all
-        // game input while open, so reusing it here can't conflict.
+        // D/F/L load the preset boats. D is helm-to-starboard and the
+        // arrows are env keys in the game, but the editor freezes all game
+        // input while open, so reusing them here can't conflict.
         if is_key_pressed(KeyCode::D) {
-            self.load(&KeelProfile::default_sailboat());
+            self.load_design(&BoatDesign::hallberg_rassy_38());
         }
         if is_key_pressed(KeyCode::F) {
-            self.load(&KeelProfile::fin_keel());
+            self.load_design(&BoatDesign::oday_39());
         }
         if is_key_pressed(KeyCode::L) {
-            self.load(&KeelProfile::long_keel());
+            self.load_design(&BoatDesign::alajuela_38());
+        }
+        // Displacement on Up/Down (continuous, 2 t/s) for keyboard parity
+        // with the slider.
+        let dkg = 2_000.0 * get_frame_time();
+        if is_key_down(KeyCode::Up) {
+            self.displacement_kg = (self.displacement_kg + dkg).min(DISPL_MAX_KG);
+        }
+        if is_key_down(KeyCode::Down) {
+            self.displacement_kg = (self.displacement_kg - dkg).max(DISPL_MIN_KG);
         }
         if is_key_pressed(KeyCode::Enter) {
             return EditorAction::Apply;
@@ -193,7 +279,7 @@ impl KeelEditor {
         EditorAction::None
     }
 
-    pub fn draw(&self, canvas: Rect, buttons: EditorButtons, ui: f32) {
+    pub fn draw(&self, canvas: Rect, layout: EditorLayout, ui: f32) {
         draw_rectangle(0.0, 0.0, screen_width(), screen_height(), Color::from_rgba(6, 10, 14, 210));
 
         let derived = self.profile().derive();
@@ -354,47 +440,82 @@ impl KeelEditor {
             text,
         );
 
-        // Buttons.
+        // Displacement slider: track + filled portion + knob, value and
+        // key hint to the right of the track.
+        let track = layout.weight;
+        let cy = track.y + track.h * 0.5;
+        draw_line(track.x, cy, track.x + track.w, cy, 2.0, dim);
+        let t = ((self.displacement_kg - DISPL_MIN_KG) / (DISPL_MAX_KG - DISPL_MIN_KG))
+            .clamp(0.0, 1.0);
+        let kx = track.x + track.w * t;
+        draw_line(track.x, cy, kx, cy, 4.0, bar_col);
+        draw_circle(kx, cy, 8.0 * ui, Color::from_rgba(190, 230, 245, 255));
+        draw_text(
+            format!("displacement {:.1} t [Up/Dn]", self.displacement_kg / 1000.0),
+            track.x + track.w + 12.0 * ui,
+            cy + fs * 0.25,
+            fs * 0.65,
+            text,
+        );
+
+        // Buttons. The three presets are real boats (design = curve +
+        // weight, specs in docs/reference-boats.md); labels shrink to fit
+        // their button so the boat names survive narrow viewports.
         for (rect, label) in [
-            (buttons.default, "Default [D]"),
-            (buttons.fin, "Fin keel [F]"),
-            (buttons.long, "Long keel [L]"),
-            (buttons.apply, "Apply [Enter]"),
-            (buttons.cancel, "Cancel [Esc]"),
+            (layout.hr38, "HR 38 [D]"),
+            (layout.oday, "O'Day 39 [F]"),
+            (layout.alajuela, "Alajuela 38 [L]"),
+            (layout.apply, "Apply [Enter]"),
+            (layout.cancel, "Cancel [Esc]"),
         ] {
             draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::from_rgba(30, 40, 50, 255));
             draw_rectangle_lines(rect.x, rect.y, rect.w, rect.h, 1.5, dim);
-            draw_text(label, rect.x + 10.0 * ui, rect.y + rect.h * 0.65, fs * 0.75, text);
+            let mut size = fs * 0.75;
+            let mut tw = measure_text(label, None, size as u16, 1.0).width;
+            while tw > rect.w - 10.0 * ui && size > 9.0 {
+                size -= 1.0;
+                tw = measure_text(label, None, size as u16, 1.0).width;
+            }
+            draw_text(label, rect.x + (rect.w - tw) * 0.5, rect.y + rect.h * 0.65, size, text);
         }
     }
 }
 
+/// The editor's interactive regions below the curve canvas: the three
+/// preset-boat buttons, Apply/Cancel, and the displacement slider track.
 #[derive(Clone, Copy)]
-pub struct EditorButtons {
-    pub default: Rect,
-    pub fin: Rect,
-    pub long: Rect,
+pub struct EditorLayout {
+    pub hr38: Rect,
+    pub oday: Rect,
+    pub alajuela: Rect,
     pub apply: Rect,
     pub cancel: Rect,
+    /// Displacement slider TRACK (the interactive part — the value label
+    /// drawn to its right is display-only).
+    pub weight: Rect,
 }
 
-impl EditorButtons {
-    /// Lay the five buttons out under `canvas` in a row, sized to fill
-    /// exactly `canvas.w` — a fixed button width could overflow the canvas
-    /// (and the screen) on narrow viewports, working against the whole
-    /// point of having a touch-reachable editor.
-    pub fn under(canvas: Rect, ui: f32) -> EditorButtons {
+impl EditorLayout {
+    /// Lay out the rows under `canvas`: readout text (drawn by `draw`,
+    /// not a rect here), then the displacement slider, then the five
+    /// buttons sized to fill exactly `canvas.w` — a fixed button width
+    /// could overflow the canvas (and the screen) on narrow viewports,
+    /// working against the whole point of having a touch-reachable editor.
+    pub fn under(canvas: Rect, ui: f32) -> EditorLayout {
         let gap = 14.0 * ui;
         let bw = (canvas.w - gap * 4.0) / 5.0;
         let bh = 40.0 * ui;
-        let y = canvas.y + canvas.h + 74.0 * ui;
+        let y = canvas.y + canvas.h + 104.0 * ui;
         let x0 = canvas.x;
-        EditorButtons {
-            default: Rect::new(x0, y, bw, bh),
-            fin: Rect::new(x0 + (bw + gap), y, bw, bh),
-            long: Rect::new(x0 + (bw + gap) * 2.0, y, bw, bh),
+        EditorLayout {
+            hr38: Rect::new(x0, y, bw, bh),
+            oday: Rect::new(x0 + (bw + gap), y, bw, bh),
+            alajuela: Rect::new(x0 + (bw + gap) * 2.0, y, bw, bh),
             apply: Rect::new(x0 + (bw + gap) * 3.0, y, bw, bh),
             cancel: Rect::new(x0 + (bw + gap) * 4.0, y, bw, bh),
+            // 55% of the width for the track leaves room for the value
+            // label on the right; 26 px tall so it's a real touch target.
+            weight: Rect::new(x0, canvas.y + canvas.h + 56.0 * ui, canvas.w * 0.55, 26.0 * ui),
         }
     }
 }

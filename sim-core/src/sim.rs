@@ -13,6 +13,7 @@
 //! which is what will make recordings/replays possible later exactly like
 //! Pegasus.
 
+use crate::boat::BoatDesign;
 use crate::keel::{KeelDerived, KeelProfile};
 use glam::Vec2;
 use rapier2d::prelude::*;
@@ -55,14 +56,17 @@ pub const HULL_PTS: [(f32, f32); 8] = [
     (4.2, -1.5),
 ];
 
-/// 2D area density of the hull (kg/m²). Hull area is ~38 m² => ~7.5 t
-/// displacement — sized for the current (and, for now, only) modeled ship
-/// type, a small cruising sailboat under engine (harbour manoeuvres/
-/// docking — sails furled, no sail force modeled; wind is purely an
-/// external load on the hull/rig, same as it would be on any motorboat
-/// lying to it). A second ship type would bring its own hull geometry,
-/// density, and windage constants alongside these, not in place of them.
-const HULL_DENSITY: f32 = 200.0;
+// The boat's MASS is no longer a constant here: it's the displacement of
+// the active `BoatDesign` (kg), passed to `new_with_design` and set on the
+// collider via `ColliderBuilder::mass` — Rapier still derives the angular
+// inertia and centre of mass from the hull shape (uniform distribution),
+// only the total is designer-set. Making the mass DISTRIBUTION (COM,
+// radius of gyration) adjustable too is agreed follow-up work. The boat
+// remains the one modeled ship type — a small cruising sailboat under
+// engine (sails furled, no sail force modeled; wind is purely an external
+// load on the hull/rig): a second ship TYPE would bring its own hull
+// geometry and windage constants, where a `BoatDesign` only varies the
+// keel curve and displacement on the shared hull.
 
 // Air / water densities (kg/m³) for the quadratic load formulas.
 const RHO_AIR: f32 = 1.2;
@@ -421,19 +425,26 @@ impl Default for Sim {
 }
 
 impl Sim {
-    /// A boat with the default keel profile for the current (and, for now,
-    /// only) modeled ship type: a small cruising sailboat (fin keel,
-    /// skeg-hung rudder).
+    /// A boat with the default design: the Hallberg-Rassy 38 preset (a
+    /// moderate fin keel with a skeg-hung rudder — see `boat.rs`).
     pub fn new() -> Sim {
-        Self::new_with_keel(&KeelProfile::default_sailboat())
+        Self::new_with_design(&BoatDesign::hallberg_rassy_38())
     }
 
-    /// A boat whose underwater lateral-area distribution — and therefore
-    /// its centre of lateral resistance and yaw damping — comes from
-    /// `profile` instead of the default. Used by the keel editor to try
-    /// different hull shapes.
+    /// A boat with the default displacement but a custom keel profile —
+    /// convenience for tests that probe the keel coupling in isolation.
     pub fn new_with_keel(profile: &KeelProfile) -> Sim {
-        let keel = profile.derive();
+        Self::new_with_design(&BoatDesign {
+            keel: profile.clone(),
+            ..BoatDesign::hallberg_rassy_38()
+        })
+    }
+
+    /// A boat built from a full `BoatDesign`: underwater lateral-area
+    /// distribution (=> centre of lateral resistance, yaw damping) AND
+    /// displacement. Used by the keel editor's Apply.
+    pub fn new_with_design(design: &BoatDesign) -> Sim {
+        let keel = design.keel.derive();
         let mut bodies = RigidBodySet::new();
         let mut colliders = ColliderSet::new();
 
@@ -481,7 +492,11 @@ impl Sim {
         colliders.insert_with_parent(
             ColliderBuilder::convex_hull(&hull)
                 .expect("hull points form a convex polygon")
-                .density(HULL_DENSITY)
+                // Total mass = the design's displacement; Rapier derives
+                // the angular inertia and COM from the shape as if that
+                // mass were spread uniformly over it (see the mass note
+                // with the physical constants above).
+                .mass(design.displacement_kg)
                 .friction(0.4)
                 .restitution(0.05)
                 .build(),
@@ -1186,6 +1201,29 @@ mod tests {
         let astern = heading_after(-1.5);
         assert!(ahead < -0.01, "starboard helm with headway: clockwise, got {ahead}");
         assert!(astern > 0.01, "starboard helm with sternway: anticlockwise, got {astern}");
+    }
+
+    #[test]
+    fn a_heavier_boat_gathers_way_more_slowly() {
+        // Same keel (same drag), same engine — only the displacement
+        // differs, so the eventual equilibrium speed is identical but the
+        // heavier boat takes longer to get there. Checked mid-transient:
+        // from rest at full ahead, the light boat leads clearly. The two
+        // displacements are the real spread the presets cover (O'Day 39
+        // vs Alajuela 38).
+        let speed_after = |displacement_kg: f32| {
+            let design = BoatDesign { displacement_kg, ..BoatDesign::oday_39() };
+            let mut sim = Sim::new_with_design(&design);
+            run_input(&mut sim, &Env::CALM, &FULL_AHEAD, 3.0);
+            sim.boat_vel().0.length()
+        };
+        let light = speed_after(8_165.0);
+        let heavy = speed_after(11_800.0);
+        assert!(
+            light > heavy * 1.05,
+            "expected the light boat to be clearly ahead mid-transient: \
+             light {light} m/s vs heavy {heavy} m/s"
+        );
     }
 
     #[test]

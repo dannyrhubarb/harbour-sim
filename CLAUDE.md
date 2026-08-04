@@ -91,17 +91,35 @@ icons + revision injection; `.github/actions/sync-pages-branch` = commit into
     lateral-area-per-length curve along the hull) and `KeelDerived` (area,
     centre of lateral resistance, yaw damping integral — derived from the
     curve by integration, see Simulation model below).
+  - `sim-core/src/boat.rs` — `BoatDesign` (2026-08-04): the parameter
+    bundle the keel editor edits and `Sim::new_with_design` consumes — a
+    `KeelProfile` plus `displacement_kg`. Three presets named after REAL
+    boats (published specs, sources and the shared-hull caveat in
+    `docs/reference-boats.md`): `hallberg_rassy_38()` (default — fin +
+    skeg middle configuration, 8.5 t), `oday_39()` (fin + spade, 8.165 t
+    — same boat the rudder blade constants were sized from), and
+    `alajuela_38()` (heavy full keel, 11.8 t). The curve's unit makes the
+    naming honest: area-per-length at a station IS local draught (m), so
+    presets are capped at each boat's real draft (unit-tested). NOT a
+    ship-type abstraction — hull outline/windage/engine/rudder stay the
+    single shared sailboat (see Roadmap).
 - `src/main.rs` — macroquad frontend: input, fixed-timestep loop with render
   interpolation, top-down rendering (water/ripples, quay, breakwaters, boat),
   HUD (wind/current dials, throttle/rudder sliders, SOG readout, key help),
   keel design editor overlay (`E`).
-- `src/keel_editor.rs` — in-app editor for `KeelProfile`: drag a fixed-grid
-  bar chart to paint the underwater area distribution, three presets
-  (default sailboat / fin / long keel — Default [D] reloads
-  `KeelProfile::default_sailboat()`; D is safe to reuse because the editor
-  freezes all game input while open), live-derived readout, Apply respawns
-  the boat via
-  `Sim::new_with_keel`. Frontend-only — hands a plain `KeelProfile` value to
+- `src/keel_editor.rs` — in-app editor for `BoatDesign`: drag a fixed-grid
+  bar chart to paint the underwater area distribution, drag a displacement
+  slider (4–14 t range bracketing the reference boats, 100 kg steps;
+  Up/Down keys for keyboard parity), three preset buttons named after the
+  real boats in `boat.rs` — HR 38 [D] / O'Day 39 [F] / Alajuela 38 [L],
+  each loading curve AND weight together (D and the arrows are game keys,
+  but safe to reuse because the editor freezes all game input while open)
+  — live-derived readout, Apply respawns the boat via
+  `Sim::new_with_design`. The slider has its own mouse/touch claim
+  (`mouse_on_weight`/`weight_touch`, same one-claim-per-control +
+  recycled-id rules as the HUD dials) so a drag that starts on the track
+  can't start painting bars when it sweeps across the curve canvas.
+  Frontend-only — hands a plain `BoatDesign` value to
   sim-core, never reaches into physics directly. Also draws a fixed,
   non-paintable rudder marker (2026-08-03) at `sim::{RUDDER_X,
   RUDDER_CHORD, RUDDER_DEPTH}` — the same `pub` constants the physics
@@ -166,6 +184,10 @@ icons + revision injection; `.github/actions/sync-pages-branch` = commit into
   Capture is the real fix — don't remove it and rely on the fallback alone.
 - `icon.svg` — source for the PNG icons rendered at deploy time
   (`rsvg-convert` in build-site).
+- `docs/reference-boats.md` — published specs (with sources) for the real
+  boats the `BoatDesign` presets are named after, the derived numbers each
+  preset produces, and exactly what the sim does / does not take from each
+  boat (the shared-hull caveat).
 - `rust-toolchain.toml` — **pins the Rust toolchain (1.94.1)**. The first
   preview deploy failed because the runner's newer preinstalled stable broke
   the wasm RELEASE link (`rust-lld: undefined symbol: console_log/now/...` —
@@ -189,9 +211,14 @@ like Pegasus.
   All static segment colliders, inserted in a FIXED order (handle numbering
   must be deterministic). Fender feel via friction 0.5 / restitution 0.1.
 - **Boat**: one dynamic body, convex-hull collider of `HULL_PTS` (bow = +x
-  local, ~12 m × 3.8 m, ~7.5 t via `HULL_DENSITY`). `HULL_PTS` is shared
+  local, ~12 m × 3.8 m). Mass = the active `BoatDesign`'s
+  `displacement_kg` (2026-08-04, replacing the old `HULL_DENSITY = 200`
+  ≈ 7.5 t): set via `ColliderBuilder::mass`, so Rapier still derives the
+  COM and angular inertia from the hull shape (uniform spread) — only the
+  total is designer-set; adjustable COM/radius of gyration is agreed
+  follow-up work (see Roadmap). `HULL_PTS` is shared
   with the renderer, so **visuals match collision exactly** (the Pegasus
-  alignment rule). Currently the hull, keel profile, windage coefficients,
+  alignment rule). Currently the hull, windage coefficients,
   and rendering (coachroof, cockpit, sprayhood, mast + boom — see Frontend
   conventions below) are all sized for the one ship type in service: a
   small cruising sailboat. See **Ship types** under Roadmap for how a
@@ -375,20 +402,30 @@ like Pegasus.
   out-drags the bow, shoving the boat to starboard; that's what puts the
   effective centre of rotation aft of the centre of mass (`clr_offset`
   and `swept_moment` are the two off-diagonal sway↔yaw couplings of the
-  same damping matrix). `Sim::new()` uses `KeelProfile::default_sailboat()`
-  (hand-tuned close to, not identical to, the legacy constants);
-  `Sim::new_with_keel(&profile)` takes any other profile — used by the
-  keel editor.
-  **The rudder is no longer part of any preset** (2026-08-03) — `fin_keel()`
-  used to paint it as a fixed area strip at the stern, which double-counted
-  it against the live rudder foil in `sim.rs` (see the Rudder bullet
-  above); that strip is gone, so `fin_keel()` is now fore-aft symmetric
-  (`clr_offset` = 0) and its yaw damping dropped by roughly half.
-  `default_sailboat()` and `long_keel()` were never built from named
-  rudder-shaped constants the way `fin_keel()` was, so they're untouched
-  by this — if their stern-heavy shape also implicitly bakes in some of
-  the rudder's footprint, that's an open question for whoever tunes them
-  next via the (now-corrected) editor, not something guessed at here.
+  same damping matrix). `Sim::new()` uses the Hallberg-Rassy 38 preset
+  (`BoatDesign::hallberg_rassy_38()` — see `boat.rs` and
+  `docs/reference-boats.md`); `Sim::new_with_design(&BoatDesign)` takes
+  any design (curve + displacement — used by the keel editor's Apply);
+  `Sim::new_with_keel(&profile)` is the custom-curve-default-weight
+  convenience the keel-coupling tests use.
+  **The presets were renamed after real boats and re-drawn against their
+  published specs** (2026-08-04, replacing `default_sailboat()`/
+  `fin_keel()`/`long_keel()`): the curves are now capped at each boat's
+  real draft (area-per-length at a station = local draught in metres),
+  the fin moved from dead-centre to ≈0.6 m aft of centre (real fin-keeler
+  geometry — the old position read as too far forward), and each preset
+  carries its boat's real displacement. Consequence of honest end-fading
+  curves: the default's yaw damping dropped from ≈353k to ≈182k
+  N·m/(rad/s)² (the old hand-tuned curve painted 0.7–1.0 m of draught at
+  the extreme hull ends, which the cubic weighting amplifies) — the live
+  rudder foil provides the rest of the spin resistance, as it should.
+  **The rudder is no longer part of any preset** (2026-08-03) — the old
+  fin preset painted it as a fixed area strip at the stern, which
+  double-counted it against the live rudder foil in `sim.rs` (see the
+  Rudder bullet above); that strip is gone. Whether the aft-biased
+  presets implicitly bake in some rudder footprint was resolved by the
+  2026-08-04 re-draw from real hull profiles (skeg/heel painted
+  explicitly, rudder excluded).
 - **Determinism rules (inherited verbatim from Pegasus)**: fresh `Sim` per
   run — never reuse one across runs (Rapier handle numbering / warm-start
   caches); all forces inside `tick` only; no wall clock, no `gen_range`, no
@@ -465,7 +502,7 @@ like Pegasus.
   neutral (edge-triggered). Wind keeps ←/→ dir + ↑/↓ speed; current sits
   on the IJKL "second arrows" cluster (J/L dir, I/K speed) — which is why
   the keel editor moved from K to **E** (K = current speed down now). R
-  reset (reset = `respawn(&keel_profile)`, a fresh `Sim::new_with_keel`,
+  reset (reset = `respawn(&design)`, a fresh `Sim::new_with_design`,
   never an in-place teleport; env is kept but **helm/engine reset to
   `InputState::NEUTRAL`** — a fresh boat doesn't inherit a live
   telegraph), E keel design editor (freezes physics — all input and the
@@ -479,12 +516,23 @@ like Pegasus.
   mouse press).
 
 ## Roadmap (agreed direction, not yet built)
+- **Adjustable mass distribution** (agreed 2026-08-04, separate PR from
+  the displacement work): make the centre of mass and the radius of
+  gyration designer-adjustable alongside `displacement_kg` in
+  `BoatDesign`. Today Rapier spreads the displacement uniformly over the
+  hull shape (`ColliderBuilder::mass`), which fixes both; a real boat's
+  ballast keel concentrates mass low and central (smaller gyradius than
+  uniform) and its COM is not necessarily at the hull centroid. Rapier
+  supports it via explicit `MassProperties` on the collider/body.
 - **Ship types**: right now `Sim`/the renderer always build the one small
   cruising sailboat described under Simulation model — hull geometry
-  (`HULL_PTS`, `HULL_DENSITY`), windage coefficients (`CD_AIR_BOW`/
-  `CD_AIR_STERN`, `WIND_AREA_*`), keel profile (`KeelProfile::
-  default_sailboat()`), and the deck rendering are all plain constants/
-  functions, not behind any ship-type abstraction. The agreed direction is
+  (`HULL_PTS`), windage coefficients (`CD_AIR_BOW`/
+  `CD_AIR_STERN`, `WIND_AREA_*`), and the deck rendering are all plain
+  constants/
+  functions, not behind any ship-type abstraction (`BoatDesign` varies
+  only the keel curve and displacement on that shared hull — its presets
+  are 38-foot sailboat configurations, not ship types). The agreed
+  direction is
   to support a small number of other small-vessel types later (starting
   candidate: a plain workboat, which is what this sailboat itself replaced
   — see git history) by giving each its own set of these, picked at

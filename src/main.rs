@@ -11,12 +11,12 @@
 //! space with the drawing/mouse coordinates. HUD sizes below are therefore
 //! written directly in css px.
 
-use harbour_sim_core::keel::KeelProfile;
+use harbour_sim_core::boat::BoatDesign;
 use harbour_sim_core::sim::{
     BASIN_BOTTOM_Y, BASIN_HALF_W, Env, HULL_PTS, InputState, PHYSICS_DT, QUAY_DEPTH, QUAY_HALF_W,
     QUAY_Y, Sim,
 };
-use keel_editor::{EditorAction, EditorButtons, KeelEditor};
+use keel_editor::{EditorAction, EditorLayout, KeelEditor};
 use macroquad::prelude::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -79,8 +79,8 @@ fn window_conf() -> Conf {
 /// Fresh `Sim` + reset render-interpolation state, shared by the R-reset
 /// key and the keel editor's Apply — never mutate an existing `Sim` in
 /// place (determinism rule), always spawn a new one.
-fn respawn(profile: &KeelProfile) -> (Sim, Vec2, f32, Vec2, f32) {
-    let sim = Sim::new_with_keel(profile);
+fn respawn(design: &BoatDesign) -> (Sim, Vec2, f32, Vec2, f32) {
+    let sim = Sim::new_with_design(design);
     let (pos, heading) = sim.boat_pose();
     (sim, pos, heading, pos, heading)
 }
@@ -163,9 +163,9 @@ async fn main() {
     // synthesize a mouse press (= a phantom mouse dial-grab).
     simulate_mouse_with_touch(false);
 
-    let mut keel_profile = KeelProfile::default_sailboat();
-    let mut sim = Sim::new_with_keel(&keel_profile);
-    let mut editor = KeelEditor::new(&keel_profile);
+    let mut design = BoatDesign::hallberg_rassy_38();
+    let mut sim = Sim::new_with_design(&design);
+    let mut editor = KeelEditor::new(&design);
     let mut env = Env {
         wind_from_deg: 315.0,
         wind_speed: 6.0,
@@ -205,7 +205,7 @@ async fn main() {
         // IJKL — K is now current-speed-down.)
         if is_key_pressed(KeyCode::E) {
             if !editor.active {
-                editor.load(&keel_profile);
+                editor.load_design(&design);
             }
             editor.active = !editor.active;
         }
@@ -413,14 +413,14 @@ async fn main() {
 
             if do_reset {
                 // Fresh Sim per run — never reuse one (determinism rule).
-                (sim, prev_pos, prev_heading, cur_pos, cur_heading) = respawn(&keel_profile);
+                (sim, prev_pos, prev_heading, cur_pos, cur_heading) = respawn(&design);
                 accum = 0.0;
                 // Helm and engine come back neutral with the fresh boat;
                 // the environment deliberately persists (same as always).
                 input = InputState::NEUTRAL;
             }
             if do_open_editor {
-                editor.load(&keel_profile);
+                editor.load_design(&design);
                 editor.active = true;
             }
 
@@ -872,11 +872,11 @@ async fn main() {
                 600.0 * ui,
                 220.0 * ui,
             );
-            let buttons = EditorButtons::under(canvas, ui);
-            match editor.update(canvas, buttons) {
+            let layout = EditorLayout::under(canvas, ui);
+            match editor.update(canvas, layout) {
                 EditorAction::Apply => {
-                    keel_profile = editor.profile();
-                    (sim, prev_pos, prev_heading, cur_pos, cur_heading) = respawn(&keel_profile);
+                    design = editor.design();
+                    (sim, prev_pos, prev_heading, cur_pos, cur_heading) = respawn(&design);
                     accum = 0.0;
                     editor.active = false;
                 }
@@ -886,7 +886,7 @@ async fn main() {
                 EditorAction::None => {}
             }
             if editor.active {
-                editor.draw(canvas, buttons, ui);
+                editor.draw(canvas, layout, ui);
             }
         }
 
