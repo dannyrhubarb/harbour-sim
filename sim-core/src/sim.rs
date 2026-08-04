@@ -254,6 +254,143 @@ fn wetted_surface_area(profile: &KeelProfile) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
+// Attached-flow (lifting) lateral hydrodynamics: strip momentum exchange
+// ---------------------------------------------------------------------------
+//
+// The sway/yaw model used to be cross-flow drag ONLY — quadratic in the
+// local sideways speed, zero at zero drift. That is the SEPARATED-flow half
+// of the standard ship-maneuvering decomposition, and on its own it made
+// the boat turn "like a containership" going ahead (measured: 12° of
+// heading in the first 10 m of a full-rudder coast turn at 2.5 kn, where
+// the same hull backing managed 33° — backing was right because the
+// rudder's own wind-up instability carries it, and going ahead there was
+// nothing to overpower the rudder washing out its own command).
+//
+// What was missing is the ATTACHED-flow half: a hull moving FORWARD
+// through water exchanges lateral momentum with it like a low-aspect-ratio
+// wing, not just like a dragging plate. Both halves are the same single
+// strip model evaluated per station x:
+//
+//   each strip sees the local lateral relative flow  V(x) = v + w·χ
+//   and carries section added mass                   m_a(x) = ρ·π/2·a(x)²
+//
+// (χ = x − x_com; a(x) = the keel profile's local draught; m_a is the
+// classical 2D flat-plate added mass under the same free-surface mirror
+// used everywhere else in this file). The separated half charges each
+// strip quadratic drag on V — that's `drag_area`/`drag_cubic_moment`/
+// `drag_swept_moment` in keel.rs. The attached half is the momentum a
+// fluid plane gains as the hull slides through it lengthwise at u:
+//
+//   dY/dx = u · d/dx [ m_a(x) · V(x) ]
+//
+// integrated ONLY over the expansion side — from the leading end (bow
+// when making way ahead, stern when making sternway) to the station where
+// m_a peaks. Past the peak the ideal theory would have the fluid politely
+// hand the momentum back; in reality it separates at the keel's sharp
+// trailing edge and the momentum leaves in the wake (the Kutta condition —
+// the ONE structural judgement in this model, everything else is derived).
+// That single integral, evaluated with the boundary values, yields in one
+// shot the three classical results this sim previously lacked:
+//
+//   - Jones' slender-wing lift, EXACTLY: pure drift gives net side force
+//     Y = −u·v·m_a(peak) — the textbook low-AR keel lift, with the correct
+//     slope, letting the boat generate centripetal force from a few
+//     degrees of leeway ("carving") instead of a 25° quadratic-drag skid;
+//   - the Munk moment: the same integral's moment is destabilizing
+//     (∝ −u·v), the bow-into-the-turn eagerness every displacement hull
+//     has under way;
+//   - the yaw-rate coupling (the ideal part of the classic Yr/Nr
+//     derivatives) from the w·χ part of V(x).
+//
+// Fragility guards, by construction rather than by cap: the whole term
+// scales as u·V — that's U²·sinβ·cosβ across drift angle β, which
+// SELF-SATURATES at β = 45° and vanishes at β = 90° and at rest, exactly
+// the regimes where cross-flow drag (already modeled) is the correct
+// physics. Directional stability ahead is provided by the rudder foil
+// standing in the flow aft (its restoring moment outweighs the Munk
+// destabilization at all modeled speeds) — which is the real mechanism on
+// the real boat, not a tuned counterweight.
+
+/// Precomputed attached-flow integrals for making way AHEAD, about the
+/// boat's centre of mass (χ = x − `hull_com_x()`). See the block comment
+/// above.
+///
+/// **Ahead only, deliberately** (2026-08-04, found empirically and then
+/// explained): the model assumes clean potential flow DEVELOPING from the
+/// leading end — textbook-valid for the fine bow entry (it's literally
+/// the slender-wing derivation), but making sternway the "leading end"
+/// carries the deflected rudder blade, the turning propeller and its
+/// aperture, so the flow arriving at the aft body and fin is disturbed
+/// from the first metre; astern maneuvering derivatives are measured, not
+/// derived from slender-body theory, in the literature for the same
+/// reason. Verified against behaviour, not just argued: with an astern
+/// branch enabled, its u-proportional yaw damping strangled the backing
+/// turn (90° in 18.6 m of travel at 2.5 kn without it — matching the
+/// real-boat 8–16 m mooring benchmark — degrading to 57° after 35.8 m
+/// with it). Backing therefore stays on the separated (cross-flow drag)
+/// half alone, which is also what carries a real boat's backing agility:
+/// the rudder's own wind-up instability at the leading end.
+#[derive(Clone, Copy, Debug)]
+struct AttachedFlow {
+    /// χ of the Kutta cut: the AFTMOST m_a peak station — the trailing
+    /// side of the peak as seen by the bow-first oncoming flow, so a
+    /// flat-topped fin cuts at its trailing edge rather than mid-fin.
+    chi_cut: f32,
+    /// Section added mass at the cut (kg/m).
+    ma_cut: f32,
+    /// `∫ m_a dχ` over the attached region (kg).
+    j0: f32,
+    /// `∫ m_a·χ dχ` over the attached region (kg·m).
+    j1: f32,
+}
+
+/// Integrate the attached-flow coefficients from the keel profile (ahead
+/// travel: attached region = bow down to the aftmost m_a peak).
+fn attached_flow_coeffs(profile: &KeelProfile, x_com: f32) -> AttachedFlow {
+    use std::f32::consts::FRAC_PI_2;
+    const SAMPLES: usize = 256;
+    let (x_stern, x_bow) = HULL_PTS
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(lo, hi), &(x, _)| (lo.min(x), hi.max(x)));
+    let ma = |x: f32| {
+        let a = profile.sample(x);
+        RHO_WATER * FRAC_PI_2 * a * a
+    };
+    // Find the m_a peak station: the AFTMOST sample attaining the
+    // maximum, so a flat-topped fin cuts at the trailing edge of the flat
+    // rather than its middle.
+    let step = (x_bow - x_stern) / SAMPLES as f32;
+    let mut a_max = 0.0f32;
+    for i in 0..=SAMPLES {
+        a_max = a_max.max(profile.sample(x_stern + i as f32 * step));
+    }
+    let mut x_cut = x_bow;
+    for i in 0..=SAMPLES {
+        // Scan bow→stern, keeping the LAST (aftmost) peak sample.
+        let x = x_bow - i as f32 * step;
+        if profile.sample(x) >= a_max - 1e-4 {
+            x_cut = x;
+        }
+    }
+    // Attached region: bow (leading end) back to the cut.
+    let (lo, hi) = (x_cut, x_bow);
+    let n = SAMPLES.max(1);
+    let dx = (hi - lo) / n as f32;
+    let mut j0 = 0.0f32;
+    let mut j1 = 0.0f32;
+    if dx > 0.0 {
+        for i in 0..n {
+            let xa = lo + i as f32 * dx;
+            let xb = xa + dx;
+            let (ma_a, ma_b) = (ma(xa), ma(xb));
+            j0 += 0.5 * (ma_a + ma_b) * dx;
+            j1 += 0.5 * (ma_a * (xa - x_com) + ma_b * (xb - x_com)) * dx;
+        }
+    }
+    AttachedFlow { chi_cut: x_cut - x_com, ma_cut: ma(x_cut), j0, j1 }
+}
+
+// ---------------------------------------------------------------------------
 // Axial (surge) hull resistance: wave-making (approximate — see below)
 // ---------------------------------------------------------------------------
 //
@@ -629,6 +766,10 @@ pub struct Sim {
     /// Reynolds number in `tick`'s axial friction term needs it every tick,
     /// cheaper to cache than refold `HULL_PTS` each time.
     hull_length: f32,
+    /// Attached-flow (lifting) lateral coefficients — integrated once from
+    /// the keel profile at construction, see `attached_flow_coeffs` and the
+    /// block comment above it. Ahead only (see ibid.).
+    att_flow: AttachedFlow,
     /// Spooled engine response, -1..=1: the throttle input filtered through
     /// `THROTTLE_TAU`. Sim state (not input) — advanced only inside `tick`,
     /// reset for free by the fresh-`Sim`-per-run rule.
@@ -666,6 +807,7 @@ impl Sim {
         let keel = design.keel.derive();
         let wetted_surface = wetted_surface_area(&design.keel);
         let hull_length = hull_length();
+        let att_flow = attached_flow_coeffs(&design.keel, hull_com_x());
         let mut bodies = RigidBodySet::new();
         let mut colliders = ColliderSet::new();
 
@@ -745,6 +887,7 @@ impl Sim {
             keel,
             wetted_surface,
             hull_length,
+            att_flow,
             engine: 0.0,
             ticks: 0,
         }
@@ -784,6 +927,20 @@ impl Sim {
     #[cfg(test)]
     fn set_yaw_rate(&mut self, w: f32) {
         self.bodies[self.boat].set_angvel(w, true);
+    }
+
+    /// Test-only initial condition: place the boat somewhere other than
+    /// the default quay-side berth. Same before-the-first-tick rule as
+    /// `set_yaw_rate` — needed because the berth spawn sits 2.4 m off the
+    /// quay wall, which a turning-circle test would clip with its stern
+    /// swing (found the hard way: the impulse of the port quarter kissing
+    /// the quay reads exactly like a physics bug until you print the hull
+    /// corner positions).
+    #[cfg(test)]
+    fn set_pose(&mut self, x: f32, y: f32, heading: f32) {
+        let rb = &mut self.bodies[self.boat];
+        rb.set_translation(vector![x, y], true);
+        rb.set_rotation(nalgebra::UnitComplex::new(heading), true);
     }
 
     /// Test-only initial condition: send the boat along its own heading at
@@ -887,6 +1044,27 @@ impl Sim {
         // consistent with the sway/yaw drag split.
         let f_spin = -side * (0.5 * RHO_WATER * w * w.abs() * self.keel.drag_swept_moment);
         rb.add_force(vector![f_spin.x, f_spin.y], true);
+
+        // Attached-flow (lifting) lateral force + moment — the OTHER half
+        // of the strip model the three drag terms above belong to; see the
+        // block comment at `AttachedFlow`. Making way AHEAD only — see the
+        // validity-domain note on that struct for why sternway stays on
+        // the separated (drag) half alone. The leading (bow) boundary
+        // enters with m_a = 0 (undisturbed water ahead of the boat
+        // carries no body-imposed momentum), so only the Kutta-cut
+        // boundary survives in the boundary term. Scales with u·V:
+        // identically zero at rest, in pure sway, and in pure yaw — those
+        // regimes belong to the separated (drag) half above.
+        if surge > 0.0 {
+            let p = &self.att_flow;
+            let v_cut = sway + w * p.chi_cut;
+            let y_att = -surge * p.ma_cut * v_cut;
+            let n_att =
+                -surge * p.chi_cut * p.ma_cut * v_cut - surge * (sway * p.j0 + w * p.j1);
+            let f_att = side * y_att;
+            rb.add_force(vector![f_att.x, f_att.y], true);
+            rb.add_torque(n_att, true);
+        }
 
         // --- Wind load: air moving relative to the hull/superstructure.
         let ar = env.wind_vel() - v;
@@ -1007,6 +1185,101 @@ mod tests {
 
     const FULL_AHEAD: InputState = InputState { throttle: 1.0, rudder: 0.0 };
     const FULL_ASTERN: InputState = InputState { throttle: -1.0, rudder: 0.0 };
+
+    #[test]
+    fn attached_flow_reproduces_jones_slender_wing_lift() {
+        // A draught profile growing linearly from the bow tip to its peak
+        // is, to the strip-momentum model, a slender delta wing on its
+        // side. Jones' classical slender-wing result: the whole lift is
+        // set by the added mass of the widest section, Y = −u·v·m_a(peak),
+        // independent of how the area got there. The model must reproduce
+        // that EXACTLY (it's the same integral), which pins both the
+        // magnitude and the sign convention of the tick() term.
+        let peak = 1.5f32;
+        let profile = KeelProfile {
+            points: vec![Vec2::new(-2.0, peak), Vec2::new(6.0, 0.0)],
+        };
+        let att = attached_flow_coeffs(&profile, hull_com_x());
+        let ma_peak = RHO_WATER * std::f32::consts::FRAC_PI_2 * peak * peak;
+        assert!(
+            (att.ma_cut - ma_peak).abs() < ma_peak * 0.02,
+            "cut must sit at the peak: m_a {} vs {}",
+            att.ma_cut,
+            ma_peak
+        );
+        // Pure drift (w = 0): Y = s·u·m_a·v with s = −1 ahead.
+        let (u, v) = (1.5f32, 0.2f32);
+        let y = -u * att.ma_cut * v;
+        let jones = -u * v * ma_peak;
+        assert!(
+            (y - jones).abs() < jones.abs() * 0.02,
+            "lift {} should equal Jones' slender-wing value {}",
+            y,
+            jones
+        );
+    }
+
+    #[test]
+    fn attached_flow_moment_is_destabilizing_ahead() {
+        // The Munk-moment half of the same integral: making way ahead with
+        // a drift angle, the attached-flow yaw moment must push the bow
+        // FURTHER into the drift (destabilizing — what makes a hull under
+        // way eager to turn; overall directional stability comes from the
+        // rudder foil standing in the flow aft, not from this term).
+        // Drifting to port (v > 0) while moving ahead, the destabilizing
+        // sense is yaw to starboard: N < 0.
+        let att = attached_flow_coeffs(&BoatDesign::oday_39().keel, hull_com_x());
+        let (u, v, w) = (1.5f32, 0.2f32, 0.0f32);
+        let v_cut = v + w * att.chi_cut;
+        let n = -u * att.chi_cut * att.ma_cut * v_cut - u * (v * att.j0 + w * att.j1);
+        assert!(n < 0.0, "ahead + port drift must yaw the bow to starboard, got N = {n}");
+    }
+
+    #[test]
+    fn a_forward_turn_carves_instead_of_ploughing() {
+        // The behaviour the attached-flow model buys, measured the same
+        // way the real-world complaint was: full starboard rudder at
+        // 2.5 kn ahead, engine to neutral, and the boat should get through
+        // 90° of heading within a few boat lengths (the real fin-keeler
+        // benchmark is ~2; drag-only it never got there — 75° after 34 m
+        // and still going when it ran out of basin).
+        let mut sim = Sim::new_with_design(&BoatDesign::oday_39());
+        // Mid-basin: the default berth spawn is 2.4 m off the quay, and a
+        // starboard turn's first move is the stern swinging to port — into
+        // the wall (see `set_pose`).
+        sim.set_pose(0.0, -10.0, 0.0);
+        sim.set_forward_speed(1.29);
+        let turn = InputState { throttle: 0.0, rudder: 1.0 };
+        let mut dist = 0.0f32;
+        let mut dpsi = 0.0f32;
+        let (_, mut last_h) = sim.boat_pose();
+        let mut turned = false;
+        for _ in 0..(60.0 / PHYSICS_DT) as u64 {
+            sim.tick(&Env::CALM, &turn);
+            let (v, _) = sim.boat_vel();
+            dist += v.length() * PHYSICS_DT;
+            let (_, h) = sim.boat_pose();
+            let mut dh = h - last_h;
+            while dh > std::f32::consts::PI {
+                dh -= 2.0 * std::f32::consts::PI;
+            }
+            while dh < -std::f32::consts::PI {
+                dh += 2.0 * std::f32::consts::PI;
+            }
+            dpsi += dh;
+            last_h = h;
+            if dpsi.abs() >= std::f32::consts::FRAC_PI_2 {
+                turned = true;
+                break;
+            }
+        }
+        assert!(
+            turned && dist < 3.0 * hull_length(),
+            "expected 90° within 3 boat lengths, got {:.0}° after {:.1} m",
+            dpsi.to_degrees().abs(),
+            dist
+        );
+    }
 
     #[test]
     fn hull_com_x_matches_rapiers_derived_centre_of_mass() {
