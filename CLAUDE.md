@@ -93,12 +93,17 @@ icons + revision injection; `.github/actions/sync-pages-branch` = commit into
     curve by integration, see Simulation model below).
   - `sim-core/src/boat.rs` — `BoatDesign` (2026-08-04): the parameter
     bundle the keel editor edits and `Sim::new_with_design` consumes — a
-    `KeelProfile` plus `displacement_kg`. Three presets named after REAL
+    `KeelProfile` plus `displacement_kg`. Four presets named after REAL
     boats (published specs, sources and the shared-hull caveat in
     `docs/reference-boats.md`): `hallberg_rassy_38()` (default — fin +
     skeg middle configuration, 8.5 t), `oday_39()` (fin + spade, 8.165 t
-    — same boat the rudder blade constants were sized from), and
-    `alajuela_38()` (heavy full keel, 11.8 t). The curve's unit makes the
+    — same boat the rudder blade constants were sized from),
+    `elan_impression_394()` (2026-08-04, modern shallow-bodied cruiser,
+    8.0 t — smallest lateral plane and least yaw damping of the four;
+    its spec pages 403'd so the figures were triangulated from search
+    excerpts and validated by the D/L=222 consistency check, see
+    reference-boats.md), and `alajuela_38()` (heavy full keel, 11.8 t).
+    The curve's unit makes the
     naming honest: area-per-length at a station IS local draught (m), so
     presets are capped at each boat's real draft (unit-tested). NOT a
     ship-type abstraction — hull outline/windage/engine/rudder stay the
@@ -110,8 +115,9 @@ icons + revision injection; `.github/actions/sync-pages-branch` = commit into
 - `src/keel_editor.rs` — in-app editor for `BoatDesign`: drag a fixed-grid
   bar chart to paint the underwater area distribution, drag a displacement
   slider (4–14 t range bracketing the reference boats, 100 kg steps;
-  Up/Down keys for keyboard parity), three preset buttons named after the
-  real boats in `boat.rs` — HR 38 [D] / O'Day 39 [F] / Alajuela 38 [L],
+  Up/Down keys for keyboard parity), four preset buttons named after the
+  real boats in `boat.rs` — HR 38 [D] / O'Day 39 [F] / Elan 394 [G] /
+  Alajuela 38 [L],
   each loading curve AND weight together (D and the arrows are game keys,
   but safe to reuse because the editor freezes all game input while open)
   — live-derived readout, Apply respawns the boat via

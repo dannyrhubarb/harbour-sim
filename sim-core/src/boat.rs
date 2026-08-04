@@ -102,6 +102,43 @@ impl BoatDesign {
         }
     }
 
+    /// **Elan Impression 394** (Rob Humphreys, Slovenia, from 2012) — the
+    /// modern-cruiser preset: shallow flat-bottomed canoe body, cast-iron
+    /// fin, deep single spade rudder (which maps onto the sim's stern
+    /// blade), the most agile configuration of the four.
+    ///
+    /// Published specs (see `docs/reference-boats.md` for sources and the
+    /// D/L cross-check that validates them): LOA 11.90 m, LWL 10.01 m,
+    /// beam 3.91 m, draft 1.80 m (standard keel; 1.50 m shoal option),
+    /// displacement 8,000 kg, ballast 2,479 kg cast iron. The curve: a
+    /// ~1.4 m-chord iron fin at the full 1.80 m draft, centred slightly
+    /// aft of the hull centre like the O'Day's (root around/abaft the
+    /// mast), over a MARKEDLY shallower canoe body than the older boats —
+    /// the modern flat underbody carries only ~0.4 m of lateral depth
+    /// amidships and runs out to a shallow, wide stern with no skeg. Net
+    /// area ≈5.5 m², the smallest of the presets, with the least yaw
+    /// damping — despite drawing LESS water than the O'Day (1.80 m vs
+    /// 1.93 m): the agility comes from stripping lateral plane off the
+    /// hull ends, not from a deeper fin.
+    pub fn elan_impression_394() -> BoatDesign {
+        BoatDesign {
+            keel: KeelProfile {
+                points: vec![
+                    Vec2::new(-6.0, 0.0),
+                    Vec2::new(-5.2, 0.12), // shallow run under the wide stern
+                    Vec2::new(-1.6, 0.38),
+                    Vec2::new(-1.3, 1.8), // fin, at the real 1.80 m draft
+                    Vec2::new(0.1, 1.8),
+                    Vec2::new(0.4, 0.42),
+                    Vec2::new(3.2, 0.32),
+                    Vec2::new(5.4, 0.08), // bow overhang fade
+                    Vec2::new(6.0, 0.0),
+                ],
+            },
+            displacement_kg: 8_000.0,
+        }
+    }
+
     /// **Alajuela 38** (William Atkin's Ingrid lineage, back to Colin
     /// Archer; Alajuela Yacht Corp., USA, 1977–1985) — the traditional
     /// long-keel preset: a heavy full-keel double-ender with a
@@ -148,6 +185,7 @@ mod tests {
         for (design, draft, name) in [
             (BoatDesign::hallberg_rassy_38(), 1.75, "Hallberg-Rassy 38"),
             (BoatDesign::oday_39(), 1.93, "O'Day 39"),
+            (BoatDesign::elan_impression_394(), 1.80, "Elan Impression 394"),
             (BoatDesign::alajuela_38(), 1.83, "Alajuela 38"),
         ] {
             let deepest = design.keel.points.iter().map(|p| p.y).fold(0.0f32, f32::max);
@@ -162,19 +200,27 @@ mod tests {
     fn presets_rank_like_the_real_boats() {
         let hr = BoatDesign::hallberg_rassy_38();
         let oday = BoatDesign::oday_39();
+        let elan = BoatDesign::elan_impression_394();
         let alajuela = BoatDesign::alajuela_38();
-        // Displacement: fin cruiser/racer < fin+skeg cruiser < full-keel
-        // heavy cruiser — straight from the published numbers.
+        // Displacement: modern cruiser < fin cruiser/racer < fin+skeg
+        // cruiser < full-keel heavy cruiser — straight from the published
+        // numbers.
+        assert!(elan.displacement_kg < oday.displacement_kg);
         assert!(oday.displacement_kg < hr.displacement_kg);
         assert!(hr.displacement_kg < alajuela.displacement_kg);
-        // Lateral area ranks the same way: spade-rudder fin boat < fin +
-        // skeg < full keel (the full keel carries area along the whole
-        // hull, the fin concentrates it).
-        let (a_oday, a_hr, a_alajuela) =
-            (oday.keel.derive().area, hr.keel.derive().area, alajuela.keel.derive().area);
+        // Lateral area ranks the same way: modern flat underbody < spade-
+        // rudder fin boat < fin + skeg < full keel (the full keel carries
+        // area along the whole hull, the fin concentrates it; the Elan
+        // strips it off the hull ends entirely).
+        let (a_elan, a_oday, a_hr, a_alajuela) = (
+            elan.keel.derive().area,
+            oday.keel.derive().area,
+            hr.keel.derive().area,
+            alajuela.keel.derive().area,
+        );
         assert!(
-            a_oday < a_hr && a_hr < a_alajuela,
-            "areas should rank O'Day < HR < Alajuela, got {a_oday} / {a_hr} / {a_alajuela}"
+            a_elan < a_oday && a_oday < a_hr && a_hr < a_alajuela,
+            "areas should rank Elan < O'Day < HR < Alajuela, got {a_elan} / {a_oday} / {a_hr} / {a_alajuela}"
         );
     }
 
