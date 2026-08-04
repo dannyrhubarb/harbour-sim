@@ -457,7 +457,14 @@ like Pegasus.
   discharge race surfaces on the side opposite the port prop walk, so the
   boil doubles as the real-world "stern is about to walk port" cue (local
   −y is starboard — at heading 0 `side` = port = +y, same convention as
-  `PROP_WALK_ASTERN` in sim-core); the rudder blade itself is drawn
+  `PROP_WALK_ASTERN` in sim-core). **Gotcha (2026-08-04)**: the foam is
+  drawn BEFORE the hull fill, so astern streaks must START outboard of
+  the widest half-beam (1.9 m per `HULL_PTS`) or the hull paints over
+  them — the original 1.4–1.7 m offsets were covered for all but a
+  ~0.5 m stub at the stern, and the "port-side wash" visible before the
+  bias existed was a hash coincidence (the even-index streaks, then all
+  port, happened to draw the largest offsets; the starboard four were
+  fully hidden), not a rendered effect; the rudder blade itself is drawn
   BEFORE the hull fill (root under the counter), swinging by the same
   blade-angle formula sim-core uses.
 - Controls: touch/mouse = drag the dials/sliders + RESET/KEEL buttons;

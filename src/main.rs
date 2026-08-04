@@ -571,8 +571,12 @@ async fn main() {
                 } else {
                     // 6:2 starboard bias (local -y = starboard): the boil
                     // sits on the quarter opposite the astern prop walk.
+                    // Streaks must START outboard of the hull's widest
+                    // half-beam (1.9, HULL_PTS) — the foam is drawn before
+                    // the hull fill, so anything closer in is painted over
+                    // for most of its forward run.
                     let side_y = if i % 4 == 0 { 1.0 } else { -1.0 };
-                    let start = vec2(-5.2, side_y * (1.4 + 0.6 * fy.abs()));
+                    let start = vec2(-5.2, side_y * (2.0 + 0.5 * fy.abs()));
                     let p = start + vec2(ph * (2.0 - 2.5 * engine), 0.0);
                     (bl(p.x, p.y), bl(p.x + 0.6, p.y))
                 };
