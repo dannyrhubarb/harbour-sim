@@ -10,10 +10,10 @@
 //! physics outside a full respawn, keeping the "fresh Sim per run"
 //! determinism rule.
 
-use harbour_sim_core::boat::BoatDesign;
+use harbour_sim_core::boat::{BoatDesign, RudderDesign};
 use harbour_sim_core::keel::KeelProfile;
 use harbour_sim_core::sim::{
-    hull_com_x, yaw_damping_coefficient, RUDDER_CHORD, RUDDER_DEPTH, RUDDER_X,
+    hull_com_x, yaw_damping_coefficient,
 };
 use macroquad::prelude::*;
 
@@ -55,6 +55,10 @@ pub struct KeelEditor {
     /// Displacement (kg) — edited by the slider / Up-Down keys, loaded and
     /// applied together with the curve (a preset is a whole boat design).
     displacement_kg: f32,
+    /// The rudder blade of the loaded design — carried through Apply and
+    /// drawn as the fixed marker, but not yet editable here (follow-up
+    /// work): presets change it, painting doesn't.
+    rudder: RudderDesign,
     /// Touch id + position seen last frame — lets button taps use the same
     /// fresh-touch detection as the HUD dials, and lets drag painting fill
     /// in the columns between two frames' samples instead of leaving gaps
@@ -80,6 +84,7 @@ impl KeelEditor {
             active: false,
             ys: [0.0; EDIT_XS.len()],
             displacement_kg: DISPL_MIN_KG,
+            rudder: initial.rudder,
             prev_touches: Vec::new(),
             mouse_drag_prev: None,
             mouse_on_weight: false,
@@ -95,6 +100,7 @@ impl KeelEditor {
     pub fn load_design(&mut self, design: &BoatDesign) {
         self.load(&design.keel);
         self.displacement_kg = design.displacement_kg.clamp(DISPL_MIN_KG, DISPL_MAX_KG);
+        self.rudder = design.rudder;
     }
 
     /// Resample any profile onto this editor's fixed grid.
@@ -107,7 +113,11 @@ impl KeelEditor {
     /// The design as currently edited — what Apply hands to
     /// `Sim::new_with_design`.
     pub fn design(&self) -> BoatDesign {
-        BoatDesign { keel: self.profile(), displacement_kg: self.displacement_kg }
+        BoatDesign {
+            keel: self.profile(),
+            rudder: self.rudder,
+            displacement_kg: self.displacement_kg,
+        }
     }
 
     fn profile(&self) -> KeelProfile {
@@ -382,19 +392,19 @@ impl KeelEditor {
         }
         // The rudder: no longer part of the paintable curve (it's a
         // separate movable foil in `sim.rs` now, see its doc comment for
-        // why folding it into this profile double-counted it), but drawn
-        // here as a fixed reference so its size/position stay visible —
-        // "we know exactly where it is" (`RUDDER_X`/`RUDDER_CHORD`/
-        // `RUDDER_DEPTH`, the SAME constants the physics uses, not a
-        // separate guess). Drawn stacked BELOW whatever the hull/keel
-        // curve is at that station, rather than from the baseline, so it
-        // reads as an appendage hanging off the hull instead of
-        // overlapping/blending into the editable area.
-        let rudder_hull_depth = self.profile().sample(RUDDER_X);
-        let rudder_x0 = x_to_px(RUDDER_X - RUDDER_CHORD / 2.0);
-        let rudder_x1 = x_to_px(RUDDER_X + RUDDER_CHORD / 2.0);
+        // why folding it into this profile double-counted it), drawn here
+        // as a non-paintable reference from the LOADED DESIGN's own blade
+        // (`self.rudder` — the same `RudderDesign` the physics uses, not
+        // a separate guess): each preset brings its real boat's blade, so
+        // the marker moves and resizes with the preset. Drawn stacked
+        // BELOW whatever the hull/keel curve is at that station, rather
+        // than from the baseline, so it reads as an appendage hanging off
+        // the hull rather than overlapping the editable area.
+        let rudder_hull_depth = self.profile().sample(self.rudder.x);
+        let rudder_x0 = x_to_px(self.rudder.x - self.rudder.chord / 2.0);
+        let rudder_x1 = x_to_px(self.rudder.x + self.rudder.chord / 2.0);
         let rudder_top_v = rudder_hull_depth.min(MAX_AREA_PER_LEN);
-        let rudder_bottom_v = (rudder_hull_depth + RUDDER_DEPTH).min(MAX_AREA_PER_LEN);
+        let rudder_bottom_v = (rudder_hull_depth + self.rudder.depth).min(MAX_AREA_PER_LEN);
         let rudder_top = canvas.y + (rudder_top_v / MAX_AREA_PER_LEN) * canvas.h;
         let rudder_bottom = canvas.y + (rudder_bottom_v / MAX_AREA_PER_LEN) * canvas.h;
         let rudder_col = Color::from_rgba(230, 120, 80, 200);
@@ -414,7 +424,7 @@ impl KeelEditor {
             rudder_col,
         );
         draw_text(
-            "rudder (fixed, not paintable)",
+            "rudder (preset-set, not paintable)",
             rudder_x1 + 4.0 * ui,
             (rudder_top + rudder_bottom) * 0.5,
             fs * 0.55,

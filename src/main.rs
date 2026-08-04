@@ -574,11 +574,18 @@ async fn main() {
             }
         }
 
-        // Rudder blade: stock just inside the transom, drawn BEFORE the
-        // hull fill so the root reads as under the counter and only the
-        // swung part shows past the transom.
-        let te = vec2(-5.85 - 0.55 * blade.cos(), 0.55 * blade.sin());
-        let rp = bl(-5.85, 0.0);
+        // Rudder blade: stock at the ACTIVE DESIGN's blade position (each
+        // preset carries its real boat's rudder — see `RudderDesign` in
+        // boat.rs; same values the physics uses), drawn BEFORE the hull
+        // fill so the root reads as under the counter and only the swung
+        // part shows past it. Stock at the blade's leading edge, the
+        // drawn line is the chord.
+        let stock_x = design.rudder.x + design.rudder.chord / 2.0;
+        let te = vec2(
+            stock_x - design.rudder.chord * blade.cos(),
+            design.rudder.chord * blade.sin(),
+        );
+        let rp = bl(stock_x, 0.0);
         let tep = bl(te.x, te.y);
         draw_line(rp.x, rp.y, tep.x, tep.y, (0.16 * scale).max(1.5), hull_line);
 
