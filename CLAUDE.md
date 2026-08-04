@@ -124,7 +124,17 @@ icons + revision injection; `.github/actions/sync-pages-branch` = commit into
   Alajuela 38 [L],
   each loading curve AND weight together (D and the arrows are game keys,
   but safe to reuse because the editor freezes all game input while open)
-  — live-derived readout, Apply respawns the boat via
+  — live-derived readout (since 2026-08-04 led by the LWL, read from
+  `sim::waterline_extent` on the edited curve — paint the ends dry and
+  the waterline shortens live; the wet span is also drawn bright on the
+  canvas baseline; note the fixed 0.25 m grid widens resampled
+  zero-crossings slightly, so a preset's readout LWL can sit ~0.3 m
+  above its published figure — the offset exists ONLY in the editor's
+  grid resample: the preset structs themselves are exact, pinned by
+  `waterline_extent_reads_each_presets_real_lwl`, and the readout
+  describes the curve as edited, which is what Apply hands the
+  physics), Apply
+  respawns the boat via
   `Sim::new_with_design`. The slider has its own mouse/touch claim
   (`mouse_on_weight`/`weight_touch`, same one-claim-per-control +
   recycled-id rules as the HUD dials) so a drag that starts on the track
