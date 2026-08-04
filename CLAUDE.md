@@ -96,8 +96,11 @@ icons + revision injection; `.github/actions/sync-pages-branch` = commit into
   HUD (wind/current dials, throttle/rudder sliders, SOG readout, key help),
   keel design editor overlay (`E`).
 - `src/keel_editor.rs` — in-app editor for `KeelProfile`: drag a fixed-grid
-  bar chart to paint the underwater area distribution, two presets (fin/long
-  keel), live-derived readout, Apply respawns the boat via
+  bar chart to paint the underwater area distribution, three presets
+  (default sailboat / fin / long keel — Default [D] reloads
+  `KeelProfile::default_sailboat()`; D is safe to reuse because the editor
+  freezes all game input while open), live-derived readout, Apply respawns
+  the boat via
   `Sim::new_with_keel`. Frontend-only — hands a plain `KeelProfile` value to
   sim-core, never reaches into physics directly. Also draws a fixed,
   non-paintable rudder marker (2026-08-03) at `sim::{RUDDER_X,
