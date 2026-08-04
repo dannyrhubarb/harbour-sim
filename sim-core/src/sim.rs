@@ -199,7 +199,9 @@ pub fn hull_com_x() -> f32 {
 /// Zero-crossings of the piecewise-linear curve are interpolated exactly.
 /// Falls back to the full hull extent for a degenerate all-zero profile
 /// (keeps Reynolds/Froude finite while the editor paints from scratch).
-fn waterline_extent(profile: &KeelProfile) -> (f32, f32) {
+/// `pub` so the keel editor's live readout can show the painted curve's
+/// waterline length from the same code the physics uses.
+pub fn waterline_extent(profile: &KeelProfile) -> (f32, f32) {
     let (hull_aft, hull_fwd) = HULL_PTS
         .iter()
         .fold((f32::MAX, f32::MIN), |(lo, hi), &(x, _)| (lo.min(x), hi.max(x)));

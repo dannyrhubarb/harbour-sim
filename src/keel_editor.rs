@@ -12,9 +12,7 @@
 
 use harbour_sim_core::boat::{BoatDesign, RudderDesign};
 use harbour_sim_core::keel::KeelProfile;
-use harbour_sim_core::sim::{
-    hull_com_x, yaw_damping_coefficient,
-};
+use harbour_sim_core::sim::{hull_com_x, waterline_extent, yaw_damping_coefficient};
 use macroquad::prelude::*;
 
 /// Fixed control-point x positions (hull-local metres, bow positive),
@@ -465,16 +463,35 @@ impl KeelEditor {
         // checkable against a published keel area); CLR/yaw damping use
         // the drag-weighted (round-hull/flat-plate-keel) values, since
         // those are the actual lever arm and damping `tick()` applies.
+        // LWL comes from the same `waterline_extent` the physics reads
+        // (the curve's nonzero support — paint the ends dry and the
+        // waterline shortens live, hull speed with it).
+        let (wl_aft, wl_fwd) = waterline_extent(&self.profile());
         let c_yaw_q = yaw_damping_coefficient(derived.drag_cubic_moment);
         draw_text(
             format!(
-                "area {:.1} m^2   CLR {:+.2} m   yaw damping {:.0} N*m/(rad/s)^2",
-                derived.area, derived.drag_clr_offset, c_yaw_q
+                "LWL {:.1} m   area {:.1} m^2   CLR {:+.2} m   yaw damping {:.0} N*m/(rad/s)^2",
+                wl_fwd - wl_aft,
+                derived.area,
+                derived.drag_clr_offset,
+                c_yaw_q
             ),
             canvas.x,
             canvas.y + canvas.h + 46.0 * ui,
             fs * 0.8,
             text,
+        );
+        // And mark the waterline's extent on the baseline itself: the wet
+        // span drawn solid over the (dimmer) full-hull baseline, so the
+        // dry overhangs read as exactly that.
+        let wl_col = Color::from_rgba(120, 200, 230, 255);
+        draw_line(
+            x_to_px(wl_aft),
+            canvas.y,
+            x_to_px(wl_fwd),
+            canvas.y,
+            3.0,
+            wl_col,
         );
 
         // Displacement slider: track + filled portion + knob, value and
