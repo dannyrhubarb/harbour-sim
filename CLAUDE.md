@@ -492,12 +492,18 @@ like Pegasus.
     RISES slowly as Re falls (~1/log²Re), and the FORCE converges to
     zero at rest because the u² factor collapses far faster than Cf's
     logarithmic growth (Cf is capped below `ITTC_RE_FLOOR` besides).
-  - **Known simplification (maintainer review note)**: with the fore/aft
-    drag asymmetry gone (correct for pure skin friction) and the wave
-    term symmetric, full-astern equilibrium is brisk — a real transom
-    dragging backwards adds form drag the model doesn't see. Accepted at
-    POC scale; the documented DSYHS/wave upgrade path is where a
-    direction-aware residuary term would land.
+  - **Known simplification (maintainer review note; mechanism pinned
+    down 2026-08-05, see the astern note at `C_WAVE_SCALE`)**: the wave
+    term is direction-symmetric, so full-astern equilibrium is brisk
+    (measured 5.3–5.8 kn per boat vs a real 2–4). The missing physics is
+    the wave AMPLITUDE's dependence on the leading waterplane ending's
+    fineness — backing, a wide transom leads and piles up a far bigger
+    leading wave (a canoe-sterned double-ender barely pays this, part of
+    why double-enders back sweetly). Not implemented: the factor can't
+    be derived from modeled geometry (no transom exists in `HULL_PTS`)
+    and no verifiable blunt-end residuary anchor was available. Harmless
+    below ~3 kn (Fn ≲ 0.15, wave term negligible both ways), so no
+    harbour manoeuvre sees it — only a straight-line astern sprint.
   - **Verified, not just derived**: `coasting_from_cruising_speed_covers_a_realistic_distance`
     checks a basin-safe slice of the actual benchmark (the ±40 m harbour
     basin, plus the hull's own 6 m bow overhang, means a real 100 m
