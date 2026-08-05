@@ -489,6 +489,27 @@ fn attached_flow_coeffs(profile: &KeelProfile, x_com: f32) -> AttachedFlow {
 // form inputs from `HULL_PTS`/`KeelProfile` the same way
 // `wetted_surface_area` derives from them now — would sharpen the
 // AMPLITUDE for this specific hull without changing the function class.
+//
+// KNOWN SIMPLIFICATION — astern (2026-08-05): this amplitude is used for
+// BOTH travel directions, which makes full-astern equilibrium too brisk
+// (measured 5.3-5.8 kn per boat vs the 2-4 kn real boats manage). The
+// exp(-k/Fn²) SHAPE is gravity physics and direction-independent, but the
+// AMPLITUDE depends on the fineness of the LEADING waterplane ending:
+// backing, a wide flat transom stern leads and piles up a far bigger
+// leading wave than the fine bow does at the same Fn — so C_WAVE_SCALE
+// should really be direction-dependent, and per stern type (a canoe-
+// sterned double-ender like the Alajuela has near-symmetric endings and
+// little astern penalty; a wide modern transom the most — part of why
+// double-enders back sweetly). NOT implemented because the factor can't
+// be derived from modeled geometry (`HULL_PTS` is pointed at both ends —
+// the real boats' transom shape simply isn't in the model) and no
+// verifiable blunt-leading-end residuary anchor was available to cite;
+// inventing one is what this file doesn't do. Harmless in practice
+// meanwhile: below ~3 kn (Fn ≲ 0.15) the wave term is negligible in
+// EITHER direction, so every harbour manoeuvre and benchmark is
+// untouched — only an unrealistic straight-line astern SPRINT shows it.
+// The fix, when sourced: a stern-type flag on `BoatDesign` (same spirit
+// as `root_endplated`) selecting an astern amplitude factor.
 const C_WAVE_SCALE: f32 = 0.489;
 const C_WAVE_K: f32 = 0.248;
 /// Standard gravity (m/s²) — NOT the same thing as `Sim`'s Rapier `gravity`
