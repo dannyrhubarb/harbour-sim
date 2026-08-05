@@ -278,11 +278,19 @@ like Pegasus.
   motivated this whole rudder investigation.
   `rudder_lift_drag` (2026-08-03 rewrite, replacing the old `rudder_cl`):
   linear thin-airfoil slope 2π·AR/(AR+2) to ~17° (unchanged in FORM — this
-  regime was never the problem) blended into Hoerner's flat-plate
-  normal-force law (`CD_FLAT_PLATE` ≈ 1.98, a literature constant, not
-  fitted — the
-  Viterna–Corrigan technique used to extend wind-turbine blade sections
-  past stall) past ~25°, resolved into lift/drag by the chord-to-flow
+  regime was never the problem) blended into a flat-plate normal-force
+  law past ~25° (the Viterna–Corrigan technique used to extend
+  wind-turbine blade sections past stall). The plate ceiling is
+  `RUDDER_CD_MAX = flat_plate_cd(RUDDER_AR)` ≈ 1.20 (2026-08-04 second
+  pass, maintainer-sourced against the standard drag tables): the first
+  pass used Hoerner's 1.98, which is the 2D/infinite-plate LIMIT — a real
+  AR-5 blade never reaches it because broadside flow escapes under the
+  foot (Hoerner's finite-plate data: AR 1 → 1.18, 10 → 1.3, ∞ → 1.98;
+  Viterna–Corrigan's own ceiling is `1.11 + 0.018·AR`, the function now
+  in `keel.rs`). Deriving it from `RUDDER_AR` also means the lift slope
+  and post-stall drag can't disagree about the blade's
+  three-dimensionality — same derive-don't-assert move as `RUDDER_AR`
+  itself. Resolved into lift/drag by the chord-to-flow
   angle, folded by ±π so a foil overtaken by the flow (backing) is still a
   foil (`backing_reverses_the_helm`). **The old post-stall curve
   (`0.9·sin 2α` lift, induced-drag-only `cd`) was backwards at the one
@@ -364,9 +372,25 @@ like Pegasus.
   way from 3 kn to 1 kn in ~17 m; real boats this size are still above 1 kn
   past 100 m.
   - `ittc57_cf(re) = 0.075/(log10(re)-2)²`, the standard formula (ITTC's
-    own recommended procedure 7.5-02-02-02) — `Re=0` correctly gives
-    `Cf=0` via IEEE float arithmetic (`log10(0)=-inf`) with no
-    special-casing.
+    own recommended procedure 7.5-02-02-02) — clamped to `re.max(ITTC_RE_FLOOR
+    = 1e5)` before evaluating (2026-08-04 fix). The formula has a genuine
+    mathematical POLE at `Re = 100` (`log10(Re) = 2` zeroes the
+    denominator), not just the `Re = 0` case its shape suggests is the
+    only edge case — real hulls never operate anywhere near there (this
+    hull is Re ~1.5e7 at 3 kn; the line is meant for Re > ~10^6), so the
+    1e5 floor is a generous margin below any speed this sim cares about
+    while sitting safely away from the singularity, and the clamp only
+    ever engages at speeds low enough that `surge·|surge|` at the call
+    site already drives the actual FORCE toward zero regardless of what
+    `Cf` does. **Found live, by the CD split above**: a boat resting
+    almost exactly still against the quay (wind-pinned, near-zero but
+    nonzero surge from floating-point noise) had its Reynolds number
+    drift across exactly 100 on the way through zero and got launched
+    sideways by a momentary near-infinite friction force — the CD split
+    didn't cause this (the pole was always there), it just perturbed the
+    settle trajectory enough to cross it within a 40 s test window where
+    the previous trajectory hadn't. `the_quay_stops_an_onshore_wind` is
+    what caught it.
   - `wetted_surface_area()` integrates a per-station semi-ellipse girth
     (`π/2·(half-beam+draught)`) along `HULL_PTS`' own beam curve and the
     keel profile's own draught curve (see the Keel profile bullet — profile
@@ -387,7 +411,13 @@ like Pegasus.
     mechanism backwards, caught in maintainer review): `Cf` actually
     RISES slowly as Re falls (~1/log²Re), and the FORCE converges to
     zero at rest because the u² factor collapses far faster than Cf's
-    logarithmic growth.
+    logarithmic growth (Cf is capped below `ITTC_RE_FLOOR` besides).
+  - **Known simplification (maintainer review note)**: with the fore/aft
+    drag asymmetry gone (correct for pure skin friction) and the wave
+    term symmetric, full-astern equilibrium is brisk — a real transom
+    dragging backwards adds form drag the model doesn't see. Accepted at
+    POC scale; the documented DSYHS/wave upgrade path is where a
+    direction-aware residuary term would land.
   - **Verified, not just derived**: `coasting_from_cruising_speed_covers_a_realistic_distance`
     checks a basin-safe slice of the actual benchmark (the ±40 m harbour
     basin, plus the hull's own 6 m bow overhang, means a real 100 m
@@ -520,6 +550,49 @@ like Pegasus.
   presets implicitly bake in some rudder footprint was resolved by the
   2026-08-04 re-draw from real hull profiles (skeg/heel painted
   explicitly, rudder excluded).
+  **The profile's Cd is no longer one flat number** (2026-08-04): a
+  fin/skeg keel is thin, flat-plate-like material broadside to the flow
+  (`CD_KEEL_PLATE = 1.2`), while the hull's own canoe body is round
+  (`CD_ROUND_HULL = 1.1`, the circular-cylinder cross-flow analogy).
+  **Second pass, same day (maintainer-sourced against the standard drag
+  tables — NASA shape-effects / Hoerner)**: the first pass used 1.98 for
+  the plate material, which is the 2D/INFINITE-plate limit; real keels
+  sit at finite mirrored aspect ratios (~1 for a chordy fin to ~8 for a
+  full keel read as one slender plate — "mirrored" because the hull
+  end-plates the root, same doubling as `RUDDER_AR`), which Hoerner's
+  finite-plate data caps at ~1.13–1.25 (`flat_plate_cd(ar) = 1.11 +
+  0.018·ar`, the Viterna–Corrigan ceiling, now the shared function in
+  `keel.rs`; the rudder's `RUDDER_CD_MAX` evaluates it at the blade's own
+  AR ≈ 5 → 1.20). Honest consequence: at real aspect ratios the two
+  materials nearly converge (1.2 vs 1.1) and the split's numeric bite
+  mostly collapses — what survives is the structure plus the one robust
+  physical asymmetry, Re-dependence: sharp-edged plate material has no
+  drag crisis (separation fixed at the edges), while a smooth round bilge
+  crosses the cylinder drag-crisis band (Re ≈ 2–5·10⁵, Cd → ~0.3–0.7)
+  right in this sim's sway-speed range — `CD_ROUND_HULL` keeps the
+  subcritical value with that uncertainty documented on the constant as
+  the upgrade path. (Also worth knowing: the "streamlined half-body
+  Cd ≈ 0.09" from those same tables is AXIAL flow, not broadside — and
+  the surge model already lands there for free: backing an effective
+  frontal-area Cd out of the ITTC friction model at 3 kn gives ≈ 0.06.)
+  `derive()`
+  splits each station's depth at `HULL_BASELINE_DRAFT = 0.5` m (the
+  judgement-call constant here, like `HULL_FORM_FACTOR` below — a keel
+  bolts onto the BOTTOM of the hull, so a deep station's profile passes
+  through this much rounded hull shell before it's keel material; not
+  picked blind — it sits just below the "just canoe body, no fin/skeg"
+  shoulder depth the presets already draw in `boat.rs`, 0.6 m for the
+  Hallberg-Rassy 38 and 0.55 m for the O'Day 39, so those shoulders read
+  as mostly hull rather than a too-thin baseline shaving off a chunk of
+  them as flat-plate — an earlier 0.3 m pass undershot this on a first
+  guess) and Cd-weights the two parts separately, producing `drag_area`/
+  `drag_clr_offset`/`drag_cubic_moment`/`drag_swept_moment` alongside the
+  existing pure-geometry fields (`area`/`clr_offset`/`cubic_moment`/
+  `swept_moment`, kept unweighted for callers that want the real physical
+  shape, e.g. boat-to-boat area comparisons in `boat.rs`'s tests). `tick`
+  uses only the `drag_*` fields now — `CD_WATER_LAT` as a flat constant is
+  gone from `sim.rs` entirely, folded into `keel.rs`'s per-station
+  weighting instead.
 - **Determinism rules (inherited verbatim from Pegasus)**: fresh `Sim` per
   run — never reuse one across runs (Rapier handle numbering / warm-start
   caches); all forces inside `tick` only; no wall clock, no `gen_range`, no

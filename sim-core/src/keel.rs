@@ -28,6 +28,71 @@
 
 use glam::Vec2;
 
+/// Cross-flow drag coefficient of a well-faired, round hull section (a
+/// canoe body's own bilge/garboard, or a full keel's rounded, torpedo-like
+/// deadwood) moving broadside through water. The engineering analogy is a
+/// circular cylinder in cross-flow: 2D subcritical Cd ≈ 1.17, knocked
+/// down ~15% by finite-length end relief at this hull's mirrored
+/// length-to-draught ratio (~10), pushed back up some by the free surface
+/// and the garboard/keel-stub roughness of a real bilge — a defensible
+/// band of ~0.9–1.2, and this sits inside it. **Known open uncertainty
+/// (2026-08-04, don't paper over it if it ever matters)**: those cylinder
+/// values are SUBCRITICAL, and a smooth round section has a drag crisis
+/// (Cd drops to ~0.3–0.7) above Re ≈ 2–5·10⁵ — which is exactly the band
+/// this hull's sway Reynolds number (on mirrored draught ~1.2 m) crosses
+/// between a 0.1 m/s creep and a 1 m/s shove. Sharp-edged plate material
+/// has NO drag crisis (separation is fixed at the edges), so
+/// Re-robustness — not raw magnitude — is the physically solid asymmetry
+/// between this constant and `CD_KEEL_PLATE`. We keep the subcritical
+/// value because harbour drift speeds sit at or below the transition;
+/// a Re-dependent round-section Cd is the honest upgrade path.
+pub const CD_ROUND_HULL: f32 = 1.1;
+/// Broadside drag coefficient of a FINITE flat plate vs. its aspect
+/// ratio: the Viterna–Corrigan post-stall ceiling (`Cd_max = 1.11 +
+/// 0.018·AR`, their own prescription, valid to AR ≈ 50), which tracks
+/// Hoerner's measured rectangular-plate data (*Fluid-Dynamic Drag*:
+/// AR 1 → 1.18, 5 → 1.2, 10 → 1.3, 20 → 1.5, ∞ → 1.98). The
+/// often-quoted 1.98 is the two-dimensional LIMIT — a plate so long the
+/// flow can only escape around its long edges — and no real keel or
+/// rudder is anywhere near it: broadside flow also escapes under the
+/// foot, relieving the pressure difference (2026-08-04 second pass,
+/// correcting an earlier use of the 2D value for everything; the
+/// maintainer caught it against the standard drag-coefficient tables).
+/// `ar` is the MIRRORED aspect ratio where a boundary blocks an escape
+/// path: the hull end-plates a keel or rudder root, so the effective
+/// plate is the real one plus its reflection — the same doubling
+/// `sim.rs` applies to `RUDDER_AR` for the lift slope.
+pub const fn flat_plate_cd(ar: f32) -> f32 {
+    1.11 + 0.018 * ar
+}
+/// Cd for the keel/skeg plate material in the per-station split below.
+/// One value, not per-profile: the mirrored broadside aspect ratios of
+/// every real configuration modeled run from ~1 (the HR 38's chordy fin)
+/// to ~8 (a full keel read as one slender plate), which `flat_plate_cd`
+/// maps to only 1.13–1.25 — a ±5% spread that doesn't justify
+/// per-profile machinery, and a per-station integral has no defined
+/// local AR anyway. 1.2 is the middle of that band (also exactly the
+/// classic AR-5 table value).
+pub const CD_KEEL_PLATE: f32 = 1.2;
+/// Depth (m) of underwater lateral area, at ANY station, attributed to the
+/// hull's own rounded canoe body before it counts as added keel/skeg/
+/// deadwood material. A keel bolts onto the BOTTOM of the hull, so a deep
+/// station's profile passes through the actual rounded hull shell (this
+/// depth's worth) before transitioning into keel structure — the split is
+/// per depth, not per station, so it applies uniformly whether the profile
+/// is shallow (pure hull) or deep (hull + keel stacked). Not picked in a
+/// vacuum: it's a bit BELOW the "just canoe body, no fin/skeg" shoulder
+/// depth the reference-boat presets already draw in `boat.rs` — 0.6 m for
+/// the Hallberg-Rassy 38, 0.55 m for the O'Day 39, the plateau either side
+/// of their fin — so those shoulders read as mostly hull instead of a
+/// baseline this low (an earlier 0.3 m draft) misclassifying a chunk of
+/// them as flat-plate material. Also in line with the published order of
+/// magnitude for a bare ~38 ft canoe-body draught (~0.5-0.7 m). Still the
+/// one judgement-call constant in this split, on the same footing as
+/// `HULL_FORM_FACTOR` in sim.rs — not read from geometry or a fixed
+/// formula, and not fitted to hit a target.
+const HULL_BASELINE_DRAFT: f32 = 0.5;
+
 /// Piecewise-linear underwater lateral-area distribution: each point is
 /// `(x, a)` where `x` is position along the hull (bow positive, metres) and
 /// `a` is lateral area per unit length at that `x` (m²/m). Must be sorted
@@ -38,30 +103,52 @@ pub struct KeelProfile {
 }
 
 /// Hydrodynamic constants derived from a [`KeelProfile`] by integrating it.
+/// The `drag_*` fields fold in the round-hull/flat-plate-keel material
+/// split (see `CD_ROUND_HULL`/`CD_KEEL_PLATE`/`HULL_BASELINE_DRAFT`) so
+/// `sim.rs` no longer applies a single flat Cd to them afterward — the
+/// plain `area`/`clr_offset` fields stay pure geometry (m²/m, unweighted)
+/// for callers that want the real physical shape, e.g. boat-to-boat area
+/// comparisons.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct KeelDerived {
-    /// Total lateral area (m²) — feeds the sway drag magnitude in place of
-    /// a flat `WATER_AREA_LAT`.
+    /// Total lateral area (m²) — the real geometric quantity, NOT Cd
+    /// weighted (see `drag_area` for the drag-magnitude version).
     pub area: f32,
-    /// Centroid position along the hull (m) — the sway force's lever arm,
-    /// in place of `WATER_CLR_OFFSET`.
+    /// Centroid position along the hull (m) — the geometric centre of the
+    /// underwater lateral plane, NOT Cd weighted (see `drag_clr_offset`
+    /// for the sway force's actual lever arm).
     pub clr_offset: f32,
-    /// `∫ a(x) |x|^3 dx` (m^5): during yaw, a strip at radius `x` sweeps
-    /// sideways at `w·x`, and drag on it is quadratic in that speed, so its
-    /// torque contribution scales as `x · (w·x)|w·x| ∝ x^3`. The yaw
-    /// damping coefficient is `0.5 * RHO_WATER * CD_WATER_LAT * cubic_moment`.
+    /// `∫ a(x) |x|^3 dx` (m^5), NOT Cd weighted — see `drag_cubic_moment`.
     pub cubic_moment: f32,
-    /// `∫ a(x) x·|x| dx` (m^4), SIGNED: the strips resisting a spin don't
-    /// pull symmetrically when the area is biased fore/aft, so rotation
-    /// produces a net SIDE FORCE, not just the damping torque above — e.g.
-    /// spin an aft-biased hull clockwise and the stern (big area, sweeping
-    /// to port) out-drags the bow (small area, sweeping to starboard),
-    /// shoving the whole boat to starboard and putting the effective centre
-    /// of rotation aft of the centre of mass. Zero for a fore-aft symmetric
-    /// profile. This is the reciprocal twin of `clr_offset`: that one says
-    /// sway creates torque, this one says rotation creates sway force —
-    /// the two off-diagonal couplings of the same damping matrix.
+    /// `∫ a(x) x·|x| dx` (m^4), SIGNED, NOT Cd weighted — see
+    /// `drag_swept_moment`.
     pub swept_moment: f32,
+    /// `∫ cd(x)·a(x) dx` (m²): `area`, but each station's contribution is
+    /// weighted by its local material's Cd first (round hull vs flat-plate
+    /// keel — see `HULL_BASELINE_DRAFT`). Feeds the sway drag magnitude
+    /// directly: `0.5 * RHO_WATER * drag_area * sway * |sway|`, no
+    /// additional Cd factor needed.
+    pub drag_area: f32,
+    /// Cd-weighted centroid (m): where the drag-weighted area actually
+    /// concentrates, i.e. the sway force's real lever arm — `clr_offset`
+    /// pulled toward whichever end carries more flat-plate keel material.
+    pub drag_clr_offset: f32,
+    /// `∫ cd(x)·a(x) |x|^3 dx` (m^5): during yaw, a strip at radius `x`
+    /// sweeps sideways at `w·x`, and drag on it is quadratic in that
+    /// speed, so its torque contribution scales as `x · (w·x)|w·x| ∝
+    /// x^3`. The yaw damping coefficient is
+    /// `0.5 * RHO_WATER * drag_cubic_moment` — no separate Cd factor,
+    /// it's already folded in per station.
+    pub drag_cubic_moment: f32,
+    /// `∫ cd(x)·a(x) x·|x| dx` (m^4), SIGNED — the drag-weighted twin of
+    /// `swept_moment`: the strips resisting a spin don't pull symmetrically
+    /// when the (Cd-weighted) area is biased fore/aft, so rotation
+    /// produces a net SIDE FORCE, not just the damping torque above — e.g.
+    /// spin an aft-biased hull clockwise and the stern out-drags the bow,
+    /// shoving the whole boat to starboard and putting the effective
+    /// centre of rotation aft of the centre of mass. Zero for a fore-aft
+    /// symmetric profile.
+    pub drag_swept_moment: f32,
 }
 
 impl KeelProfile {
@@ -73,6 +160,18 @@ impl KeelProfile {
         let mut first_moment = 0.0f32;
         let mut cubic_moment = 0.0f32;
         let mut swept_moment = 0.0f32;
+        let mut drag_area = 0.0f32;
+        let mut drag_first_moment = 0.0f32;
+        let mut drag_cubic_moment = 0.0f32;
+        let mut drag_swept_moment = 0.0f32;
+        // Split a station's depth into its round-hull part (the first
+        // HULL_BASELINE_DRAFT of it) and its flat-plate-keel part (any
+        // excess) — see HULL_BASELINE_DRAFT's doc comment.
+        let cd_weighted = |a: f32| {
+            let hull = a.min(HULL_BASELINE_DRAFT);
+            let keel = a - hull;
+            CD_ROUND_HULL * hull + CD_KEEL_PLATE * keel
+        };
         for w in self.points.windows(2) {
             let (x0, a0) = (w[0].x, w[0].y);
             let (x1, a1) = (w[1].x, w[1].y);
@@ -92,10 +191,26 @@ impl KeelProfile {
                 first_moment += 0.5 * (xa * aa + xb * ab) * h;
                 cubic_moment += 0.5 * (xa.abs().powi(3) * aa + xb.abs().powi(3) * ab) * h;
                 swept_moment += 0.5 * (xa * xa.abs() * aa + xb * xb.abs() * ab) * h;
+
+                let (ca, cb) = (cd_weighted(aa), cd_weighted(ab));
+                drag_area += 0.5 * (ca + cb) * h;
+                drag_first_moment += 0.5 * (xa * ca + xb * cb) * h;
+                drag_cubic_moment += 0.5 * (xa.abs().powi(3) * ca + xb.abs().powi(3) * cb) * h;
+                drag_swept_moment += 0.5 * (xa * xa.abs() * ca + xb * xb.abs() * cb) * h;
             }
         }
         let clr_offset = if area > 1e-6 { first_moment / area } else { 0.0 };
-        KeelDerived { area, clr_offset, cubic_moment, swept_moment }
+        let drag_clr_offset = if drag_area > 1e-6 { drag_first_moment / drag_area } else { 0.0 };
+        KeelDerived {
+            area,
+            clr_offset,
+            cubic_moment,
+            swept_moment,
+            drag_area,
+            drag_clr_offset,
+            drag_cubic_moment,
+            drag_swept_moment,
+        }
     }
 
     /// Linear interpolation at an arbitrary `x`, clamped to the endpoint
@@ -163,6 +278,36 @@ mod tests {
             (d.swept_moment - (-50.67)).abs() < 0.5,
             "expected swept_moment ≈ -50.67, got {}",
             d.swept_moment
+        );
+    }
+
+    #[test]
+    fn shallow_profile_drags_like_round_hull_deep_profile_drags_like_keel_plate() {
+        // A profile that never exceeds HULL_BASELINE_DRAFT is entirely
+        // round canoe-body material: its drag_area should equal
+        // CD_ROUND_HULL * area, not CD_KEEL_PLATE * area.
+        let shallow = KeelProfile { points: vec![Vec2::new(-4.0, 0.2), Vec2::new(4.0, 0.2)] };
+        let ds = shallow.derive();
+        assert!(
+            (ds.drag_area - CD_ROUND_HULL * ds.area).abs() < 1e-3,
+            "shallow profile should drag as pure round hull: drag_area {} vs CD_ROUND_HULL*area {}",
+            ds.drag_area,
+            CD_ROUND_HULL * ds.area
+        );
+
+        // A profile far deeper than the baseline is overwhelmingly keel
+        // material: drag_area should sit close to CD_KEEL_PLATE * area
+        // (not exactly equal — the first HULL_BASELINE_DRAFT of every
+        // station is still round hull underneath the keel). Tolerance is
+        // tighter than the CD_ROUND_HULL/CD_KEEL_PLATE gap (0.1), so this
+        // still fails if the split ever collapses to one coefficient.
+        let deep = KeelProfile { points: vec![Vec2::new(-4.0, 6.0), Vec2::new(4.0, 6.0)] };
+        let dd = deep.derive();
+        assert!(
+            (dd.drag_area / dd.area - CD_KEEL_PLATE).abs() < 0.05,
+            "deep profile should drag close to pure keel plate: drag_area/area {} vs CD_KEEL_PLATE {}",
+            dd.drag_area / dd.area,
+            CD_KEEL_PLATE
         );
     }
 

@@ -14,7 +14,7 @@
 //! Pegasus.
 
 use crate::boat::BoatDesign;
-use crate::keel::{KeelDerived, KeelProfile};
+use crate::keel::{flat_plate_cd, KeelDerived, KeelProfile};
 use glam::Vec2;
 use rapier2d::prelude::*;
 
@@ -81,8 +81,10 @@ const RHO_WATER: f32 = 1025.0;
 const WIND_AREA_LAT: f32 = 18.0; // hull side + superstructure above water
 const WIND_AREA_FRONT: f32 = 7.0;
 
-// Drag coefficients.
-const CD_WATER_LAT: f32 = 1.1;
+// Drag coefficients. The underwater lateral (sway/yaw) Cd is no longer a
+// single flat constant here — see `KeelProfile::derive`'s `drag_*` fields
+// (`CD_ROUND_HULL`/`CD_KEEL_PLATE`/`HULL_BASELINE_DRAFT` in keel.rs), which
+// weight it per station by round-hull vs flat-plate-keel material.
 const CD_AIR_LAT: f32 = 1.0;
 // Axial windage isn't symmetric fore/aft the way the water-drag terms are:
 // the bow is a fine entry with a sprayhood shaped to deflect airflow when
@@ -93,13 +95,15 @@ const CD_AIR_LAT: f32 = 1.0;
 const CD_AIR_BOW: f32 = 0.45;
 const CD_AIR_STERN: f32 = 0.95;
 
-/// Yaw damping coefficient (N·m per (rad/s)²) for a keel's cubic moment
-/// (see `KeelDerived::cubic_moment`). Exposed so the keel editor's live
-/// readout stays derived from the same `RHO_WATER`/`CD_WATER_LAT` source
-/// of truth as `tick` uses, instead of keeping its own copy of the formula
-/// (and the constants) that could silently go stale if either changed here.
-pub fn yaw_damping_coefficient(cubic_moment: f32) -> f32 {
-    0.5 * RHO_WATER * CD_WATER_LAT * cubic_moment
+/// Yaw damping coefficient (N·m per (rad/s)²) for a keel's Cd-weighted
+/// cubic moment (see `KeelDerived::drag_cubic_moment` — the round-hull/
+/// flat-plate-keel Cd split is already folded in per station, so this is
+/// just the density factor). Exposed so the keel editor's live readout
+/// stays derived from the same `RHO_WATER` source of truth as `tick` uses,
+/// instead of keeping its own copy of the formula that could silently go
+/// stale if it changed here.
+pub fn yaw_damping_coefficient(drag_cubic_moment: f32) -> f32 {
+    0.5 * RHO_WATER * drag_cubic_moment
 }
 
 // ---------------------------------------------------------------------------
@@ -132,12 +136,30 @@ const NU_WATER: f32 = 1.19e-6;
 /// `NU_WATER`/the ITTC formula (fixed physics).
 const HULL_FORM_FACTOR: f32 = 1.2;
 
+/// Below this Reynolds number the ITTC-1957 line is clamped flat instead of
+/// evaluated directly (see `ittc57_cf`) — the formula has a genuine
+/// mathematical POLE at `Re = 100` (`log10(Re) = 2` zeroes the
+/// denominator), not just the `Re = 0` case its shape suggests is the only
+/// edge case. Real hulls never operate anywhere near there — the line is
+/// meant for ship/model-scale turbulent flow, conventionally Re > ~10^6 —
+/// so `Re = 10^5` is already a generous margin below any speed this sim
+/// cares about (3 kn on this hull is Re ~ 1.5e7) while sitting safely away
+/// from the singularity. Found live: a boat resting almost exactly still
+/// against the quay (wind-pinned, near-zero but nonzero surge from
+/// floating-point noise) drifted its Reynolds number across exactly 100 on
+/// its way through zero and got launched sideways by a momentary
+/// near-infinite friction force.
+const ITTC_RE_FLOOR: f32 = 1.0e5;
+
 /// ITTC-1957 model-ship correlation line: the standard formula for a hull's
-/// skin-friction coefficient from its Reynolds number. `Re = 0` (dead stop)
-/// correctly gives `Cf = 0` (no relative motion, no friction) with no
-/// special-casing needed: `log10(0) = -inf` in IEEE float arithmetic, so
-/// the denominator diverges and the fraction goes to 0, not NaN.
+/// skin-friction coefficient from its Reynolds number, clamped below
+/// `ITTC_RE_FLOOR` to avoid the real pole at `Re = 100` (see its doc
+/// comment) — the clamp only ever engages at speeds low enough that the
+/// resulting force is negligible anyway (it's still multiplied by
+/// `surge * |surge|` at the call site, which is what actually drives it to
+/// zero as the boat comes to rest).
 fn ittc57_cf(re: f32) -> f32 {
+    let re = re.max(ITTC_RE_FLOOR);
     0.075 / (re.log10() - 2.0).powi(2)
 }
 
@@ -278,7 +300,7 @@ fn wave_resistance_coefficient(froude: f32) -> f32 {
 
 // Sway and yaw keep a linear low-speed term (surge no longer has one — see
 // below) because their quadratic terms are keel-profile-derived
-// (`self.keel.area`, `self.keel.cubic_moment`), so a flat linear floor
+// (`self.keel.drag_area`, `self.keel.drag_cubic_moment`), so a flat linear floor
 // would silently fall out of proportion for any profile far from the one
 // it was tuned against (an extreme fin keel would keep a full keel's
 // low-speed damping; an extreme full keel would keep a fin keel's).
@@ -291,8 +313,8 @@ fn wave_resistance_coefficient(froude: f32) -> f32 {
 const SWAY_LIN_CROSSOVER_SPEED: f32 = 0.22; // m/s
 const YAW_LIN_CROSSOVER_RATE: f32 = 0.14; // rad/s
 
-fn k_lin_sway(area: f32) -> f32 {
-    0.5 * RHO_WATER * CD_WATER_LAT * area * SWAY_LIN_CROSSOVER_SPEED
+fn k_lin_sway(drag_area: f32) -> f32 {
+    0.5 * RHO_WATER * drag_area * SWAY_LIN_CROSSOVER_SPEED
 }
 
 fn k_lin_yaw(c_yaw_q: f32) -> f32 {
@@ -393,18 +415,22 @@ const RUDDER_MAX_DEG: f32 = 35.0;
 /// effect ≈5.0 — a single source of truth for the blade's shape, not two
 /// numbers that can silently drift apart.
 const RUDDER_AR: f32 = 2.0 * (RUDDER_DEPTH / RUDDER_CHORD);
+/// Broadside drag ceiling of THIS blade: the finite-plate law evaluated
+/// at the blade's own mirrored aspect ratio (see `flat_plate_cd` in
+/// keel.rs) — ≈1.20 for the real O'Day-sized blade, NOT the 2D limit
+/// 1.98 an infinitely long plate would give (2026-08-04 fix — the same
+/// second pass that corrected the keel material's Cd). Deriving it from
+/// `RUDDER_AR` means the lift slope and the post-stall drag now agree on
+/// how three-dimensional the blade is, instead of the lift side using the
+/// finite AR while the drag side quietly assumed an infinite plate — the
+/// same derive-don't-assert move as `RUDDER_AR` itself.
+const RUDDER_CD_MAX: f32 = flat_plate_cd(RUDDER_AR);
 /// The lift curve is linear (attached flow) up to STALL_ON (~17°) and
 /// follows the Hoerner flat-plate law beyond STALL_OFF (~25°), linearly
 /// blended between so neither force has a step at the break (a step would
 /// limit-cycle a helm held right at stall).
 const RUDDER_STALL_ON: f32 = 0.30; // rad
 const RUDDER_STALL_OFF: f32 = 0.44; // rad
-/// Measured drag coefficient of a flat plate held broadside to a flow
-/// (Hoerner, *Fluid-Dynamic Drag*) — a literature constant, not fitted.
-/// Used to extrapolate the rudder foil past stall (see
-/// `rudder_lift_drag`), the same technique used to extend wind-turbine
-/// blade sections past stall (Viterna–Corrigan).
-const CD_FLAT_PLATE: f32 = 1.98;
 /// Fraction of ahead thrust the deflected prop wash converts to side
 /// force at the rudder. Thrust-deflection form (F = K·T·sin δ) rather
 /// than a slipstream-velocity model: the added momentum flux in the wash
@@ -429,8 +455,8 @@ const K_WASH: f32 = 0.85;
 /// ZERO at α=90°, exactly the case that matters most (a centered blade
 /// swept broadside by the hull's own spin). That's backwards: a stalled
 /// foil is approximately a flat plate, and a flat plate's force is
-/// LARGEST at 90°, not smallest. Hoerner's flat-plate law gives the force
-/// normal to the CHORD (not the flow) as `CD_FLAT_PLATE·sin(mag)`, then
+/// LARGEST at 90°, not smallest. The flat-plate law gives the force
+/// normal to the CHORD (not the flow) as `RUDDER_CD_MAX·sin(mag)`, then
 /// resolves it into lift/drag by the chord-to-flow angle — at mag=90°
 /// that's zero lift, maximum drag: the barn-door case that brakes a spin,
 /// falling out of the same geometry as the steering force instead of
@@ -455,7 +481,7 @@ fn rudder_lift_drag(alpha: f32) -> (f32, f32) {
     let cl_lin = lin_slope * mag;
     let cd_lin = CD0 + cl_lin * cl_lin / (PI * RUDDER_AR);
     let s = mag.sin();
-    let cn = CD_FLAT_PLATE * s * s;
+    let cn = RUDDER_CD_MAX * s * s;
     let cl_plate = cn * mag.cos();
     let cd_plate = cn * s + CD0;
     let (cl, cd) = if mag <= RUDDER_STALL_ON {
@@ -784,10 +810,11 @@ impl Sim {
         // No added low-speed linear term either — but for the right
         // reason (maintainer review caught the first version of this
         // comment stating the mechanism BACKWARDS): Cf actually RISES
-        // slowly as Re falls (~1/log²Re). The FORCE still converges
-        // cleanly to zero at rest because the u² factor below collapses
-        // far faster than Cf's logarithmic growth. It's the product that
-        // vanishes, not the coefficient.
+        // slowly as Re falls (~1/log²Re — 0.003 at Re 10⁷, 0.008 at the
+        // 10⁵ floor). The FORCE still converges cleanly to zero at rest
+        // because the u² factor below collapses far faster than Cf's
+        // logarithmic growth, and below ITTC_RE_FLOOR Cf is capped
+        // anyway. It's the product that vanishes, not the coefficient.
         let re = surge.abs() * self.hull_length / NU_WATER;
         let cf = ittc57_cf(re) * HULL_FORM_FACTOR;
         let f_friction = 0.5 * RHO_WATER * cf * self.wetted_surface * surge * surge.abs();
@@ -800,35 +827,39 @@ impl Sim {
         let f_wave = rb.mass() * G_EARTH * wave_resistance_coefficient(froude) * surge.signum();
         let f_surge = -fwd * (f_friction + f_wave);
         let f_sway = -side
-            * (0.5 * RHO_WATER * CD_WATER_LAT * self.keel.area * sway * sway.abs()
-                + k_lin_sway(self.keel.area) * sway);
+            * (0.5 * RHO_WATER * self.keel.drag_area * sway * sway.abs()
+                + k_lin_sway(self.keel.drag_area) * sway);
         // Surge drag acts through the centre; the lateral force acts at the
-        // keel profile's centre of lateral resistance (see keel.rs) —
-        // aft-of-centre for a typical skeg/rudder boat => weathervaning.
+        // keel profile's DRAG-WEIGHTED centre of lateral resistance (see
+        // keel.rs's `drag_clr_offset` — pulled toward whichever end carries
+        // more flat-plate keel material, not just where the raw area sits)
+        // — aft-of-centre for a typical skeg/rudder boat => weathervaning.
         rb.add_force(vector![f_surge.x, f_surge.y], true);
-        let clr = pos + fwd * self.keel.clr_offset;
+        let clr = pos + fwd * self.keel.drag_clr_offset;
         rb.add_force_at_point(vector![f_sway.x, f_sway.y], point![clr.x, clr.y], true);
 
-        // Yaw drag: the same lateral-area profile, but its cubic moment —
-        // the water resists the hull sweeping around its own axis more than
-        // it resists straight sway, because points far from the pivot move
-        // faster during rotation and drag is quadratic in speed.
-        let c_yaw_q = yaw_damping_coefficient(self.keel.cubic_moment);
+        // Yaw drag: the same lateral-area profile, but its Cd-weighted
+        // cubic moment — the water resists the hull sweeping around its
+        // own axis more than it resists straight sway, because points far
+        // from the pivot move faster during rotation and drag is quadratic
+        // in speed.
+        let c_yaw_q = yaw_damping_coefficient(self.keel.drag_cubic_moment);
         rb.add_torque(-(c_yaw_q * w * w.abs() + k_lin_yaw(c_yaw_q) * w), true);
 
         // Rotation-induced SIDE FORCE (the torque above's inseparable twin):
         // the strips resisting the spin don't pull symmetrically when the
-        // area is biased fore/aft. A strip at position x sweeps sideways at
-        // w·x, so its drag is ∝ a(x)·(w·x)|w·x|; summed along the hull the
-        // net sway force is -0.5·ρ·Cd·w|w|·∫a(x)·x|x|dx (the profile's
-        // signed swept_moment). For an aft-biased keel spun clockwise the
+        // (Cd-weighted) area is biased fore/aft. A strip at position x
+        // sweeps sideways at w·x, so its drag is ∝ cd(x)·a(x)·(w·x)|w·x|;
+        // summed along the hull the net sway force is
+        // -0.5·ρ·w|w|·∫cd(x)·a(x)·x|x|dx (the profile's signed
+        // drag_swept_moment — no separate Cd factor, already folded in per
+        // station, see keel.rs). For an aft-biased keel spun clockwise the
         // stern out-drags the bow and shoves the boat to starboard, which
         // is what puts the effective centre of rotation aft of the centre
         // of mass. Applied through the centre (the couple component is
         // already the torque above); sway↔yaw cross terms are neglected,
         // consistent with the sway/yaw drag split.
-        let f_spin =
-            -side * (0.5 * RHO_WATER * CD_WATER_LAT * w * w.abs() * self.keel.swept_moment);
+        let f_spin = -side * (0.5 * RHO_WATER * w * w.abs() * self.keel.drag_swept_moment);
         rb.add_force(vector![f_spin.x, f_spin.y], true);
 
         // --- Wind load: air moving relative to the hull/superstructure.
@@ -1346,7 +1377,14 @@ mod tests {
         // silent the way a lift-only curve would.
         let (cl_90, cd_90) = rudder_lift_drag(std::f32::consts::FRAC_PI_2);
         assert!(cl_90.abs() < 1e-3, "a blade square to the flow produces no lift, got {cl_90}");
-        assert!(cd_90 > 1.5, "a blade square to the flow should be near-maximum drag, got {cd_90}");
+        // "Near-maximum" is relative to THIS blade's finite-AR ceiling
+        // (RUDDER_CD_MAX ≈ 1.20), not the 2D-plate 1.98 — asserting a
+        // hard-coded 1.5 here would quietly re-assert the infinite-plate
+        // assumption the ceiling was derived to avoid.
+        assert!(
+            cd_90 > RUDDER_CD_MAX * 0.95,
+            "a blade square to the flow should be near its max drag {RUDDER_CD_MAX}, got {cd_90}"
+        );
 
         // And the behaviour it buys: the INITIAL helm bite. Slammed
         // hard-over the blade starts stalled and bites more weakly than a
@@ -1497,5 +1535,19 @@ mod tests {
             n > 0.55 && n < 0.72,
             "expected the engine near 1-1/e one time constant in, got {n}"
         );
+    }
+    #[test]
+    fn ittc57_cf_is_finite_across_the_low_reynolds_pole() {
+        // The raw ITTC-1957 line has a genuine mathematical pole at
+        // Re = 100 (log10(Re) = 2 zeroes the denominator) — seen live as
+        // a wind-pinned boat getting launched sideways when float noise
+        // drifted its Reynolds number across it, and flagged in review.
+        // The ITTC_RE_FLOOR clamp must keep Cf finite (and small) through
+        // the whole sub-validity range, pole included.
+        for re in [0.0, 99.0, 100.0, 101.0, ITTC_RE_FLOOR] {
+            let cf = ittc57_cf(re);
+            assert!(cf.is_finite(), "expected finite Cf at Re = {re}, got {cf}");
+            assert!(cf > 0.0 && cf < 0.01, "clamped Cf should be small, got {cf} at Re = {re}");
+        }
     }
 }
