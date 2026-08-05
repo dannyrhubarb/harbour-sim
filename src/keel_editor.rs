@@ -414,8 +414,10 @@ impl KeelEditor {
             rudder_col,
         );
 
-        // Centre of lateral resistance marker.
-        let clr_t = ((derived.clr_offset + 6.0) / 12.0).clamp(0.0, 1.0);
+        // Centre of lateral resistance marker — the DRAG-weighted centroid
+        // (round-hull vs flat-plate-keel material, see keel.rs), the same
+        // lever arm `tick()` actually applies the sway force at.
+        let clr_t = ((derived.drag_clr_offset + 6.0) / 12.0).clamp(0.0, 1.0);
         let clr_x = canvas.x + canvas.w * clr_t;
         draw_line(
             clr_x,
@@ -427,12 +429,15 @@ impl KeelEditor {
         );
         draw_text("CLR", clr_x + 4.0 * ui, canvas.y + 16.0 * ui, fs * 0.65, Color::from_rgba(255, 170, 60, 255));
 
-        // Live readout.
-        let c_yaw_q = yaw_damping_coefficient(derived.cubic_moment);
+        // Live readout. Area stays the real geometric total (m², sanity-
+        // checkable against a published keel area); CLR/yaw damping use
+        // the drag-weighted (round-hull/flat-plate-keel) values, since
+        // those are the actual lever arm and damping `tick()` applies.
+        let c_yaw_q = yaw_damping_coefficient(derived.drag_cubic_moment);
         draw_text(
             format!(
                 "area {:.1} m^2   CLR {:+.2} m   yaw damping {:.0} N*m/(rad/s)^2",
-                derived.area, derived.clr_offset, c_yaw_q
+                derived.area, derived.drag_clr_offset, c_yaw_q
             ),
             canvas.x,
             canvas.y + canvas.h + 46.0 * ui,
