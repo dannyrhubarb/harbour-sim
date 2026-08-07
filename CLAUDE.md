@@ -269,14 +269,16 @@ like Pegasus.
   `wetted_surface_area` integrates over the wet range only — before this,
   every design motored like an 11.9 m-waterline boat and carried phantom
   wetted area over its dry overhangs. Measured consequences (28 hp, full
-  throttle): HR 38 (LWL 9.50) 6.5 kn, O'Day 39 (10.21) 6.7, Elan I394
-  (10.01) 6.7, Alajuela 38 (9.93, 11.8 t) 6.0 — each ~85% of its own
-  hull speed, the heavy short-waterline full keeler honestly slowest.
-  Offline 3→1 kn coasting: 119 m (HR) to 138 m (Alajuela — heavy boats
-  carry their way), vs ~99 m when the shared outline length was doing
-  this job; still matching the "real boats are above 1 kn past 100 m"
-  benchmark that motivated the ITTC rewrite. `hull_length()` (the LOA
-  measure) survives only as the tests' boat-length yardstick.
+  throttle, in-`tick` open-water measurement 2026-08-07 — **superseding
+  the offline-integrated 6.5/6.7/6.7/6.0 kn quoted here before, which
+  the real `tick` cannot reproduce**, see the open-water-benchmarks
+  bullet below): HR 38 (LWL 9.50) 5.6 kn, O'Day 39 (10.21) 5.9, Elan
+  I394 (10.01) 5.8, Alajuela 38 (9.93, 11.8 t) 5.5 — each 71–76% of its
+  own hull speed, the heavy short-waterline full keeler honestly
+  slowest. 3→1 kn coasting: 110 m (O'Day) to 129 m (Alajuela — heavy
+  boats carry their way), matching the "real boats are above 1 kn past
+  100 m" benchmark that motivated the ITTC rewrite. `hull_length()` (the
+  LOA measure) survives only as the tests' boat-length yardstick.
 - **Env** (`wind_from_deg`, `wind_speed`, `current_to_deg`, `current_speed`):
   compass convention 0° = north = +y, 90° = east = +x. Wind is named by
   where it blows FROM (mariners' convention), current by where it sets
@@ -505,13 +507,13 @@ like Pegasus.
     below ~3 kn (Fn ≲ 0.15, wave term negligible both ways), so no
     harbour manoeuvre sees it — only a straight-line astern sprint.
   - **Verified, not just derived**: `coasting_from_cruising_speed_covers_a_realistic_distance`
-    checks a basin-safe slice of the actual benchmark (the ±40 m harbour
-    basin, plus the hull's own 6 m bow overhang, means a real 100 m
-    straight-line run hits the wall around 34 m — full-scale verification
-    of the 3→1 kn distance was done by integrating the real `tick()`
-    formula offline, not inside `Sim`: ~99 m originally on the shared
-    11.9 m outline length; 119–138 m per boat since the per-design
-    waterline refactor, see the Waterline bullet).
+    runs the full 3 kn → 1 kn benchmark through the real `tick` in the
+    open-water test arena (2026-08-07; it used to check a 20 s
+    basin-safe slice — the ±40 m basin plus the hull's 6 m bow overhang
+    stop a straight run at ~34 m — and lean on an OFFLINE re-integration
+    of the formulas for the full distance, which was retired after it
+    was caught drifting from the real `tick`, see the
+    open-water-benchmarks bullet below). Per-boat distances: 110–129 m.
   - **What fixing this correctly EXPOSED**: full-throttle equilibrium
     initially came out to ~4.85 m/s (9.4 kn) — above this hull's classic
     displacement hull speed (~8.4 kn), not achievable on 28 hp in reality.
@@ -555,11 +557,18 @@ like Pegasus.
   **Consistency check, not a target**: solving those two constants and
   re-running the equilibrium landed full-throttle at 6.3 kn — close to the
   ~6.2 kn this sim's engine sizing always assumed (`T_BOLLARD_AHEAD`'s
-  comment), without that number being an input anywhere in the derivation
-  (with per-design waterlines the equilibria are 6.0–6.7 kn per boat —
-  see the Waterline bullet).
+  comment), without that number being an input anywhere in the derivation.
+  **That check did not survive the waterline refactor** (caught
+  2026-08-07 by the open-water in-`tick` measurement): the calibration
+  was solved against the shared 11.9 m outline waterline, and on the
+  presets' real 9.5–10.2 m LWLs the same amplitude bites ~1 kn harder —
+  the shipped equilibria are 5.5–5.9 kn per boat (71–76% of hull speed,
+  vs ~6.5–7 kn for real ~38 ft auxiliaries). An open calibration
+  question, deliberately NOT retuned by feel: shrinking `C_WAVE_SCALE`
+  until the number looks right is the invented-constant move this file
+  bans; the honest fix is the DSYHS upgrade path below.
   Verified the low-speed coasting benchmark stays undisturbed too (Cw is
-  negligible at 1–3 kn / Fn~0.05–0.15, so the 119–138 m per-boat
+  negligible at 1–3 kn / Fn~0.05–0.15, so the 110–129 m per-boat
   distances in the Waterline bullet are set by friction alone) —
   `wave_resistance_is_negligible_at_low_speed_and_dominant_near_hull_speed`
   locks in both ends plus monotonicity. **Upgrade path, written down so it
@@ -642,6 +651,33 @@ like Pegasus.
     would cut the entry moment 15% for a limit we never reach) and the
     yaw inertia (Rapier's uniform hull spread happens to land at
     gyradius 0.27·LOA, inside the real 0.25–0.30·LOA sailboat band).
+    (The specific turn distances in this note are from the in-basin,
+    shared-blade era they were measured in — the canonical per-boat
+    numbers now live in docs/reference-boats.md's open-water table; the
+    protocol lessons are what this note is for.)
+- **Open-water benchmarks & pins** (2026-08-07, sim.rs tests): the
+  shipped harbour is a closed 80 × 36 m basin, capping any benchmark run
+  at ~30 m of path — which is why the old handling table had "— ran out
+  of basin" cells and why coasting used to be "verified" by
+  re-integrating the tick() formulas OFFLINE. `Sim::new_open_water`
+  (`#[cfg(test)]`, same construction minus the four wall colliders — the
+  shipped world and its fixed collider-insertion order are untouched)
+  removes the walls, so every benchmark now runs through the real
+  `tick`. `measure_open_water_benchmarks` (`#[ignore]`d harness; run
+  with `--ignored --nocapture`) regenerates the measured-performance
+  table in docs/reference-boats.md; `open_water_benchmarks_stay_pinned`
+  pins every cell (±2% speeds, ±5% distances, ±3° capped headings) so a
+  physics change that shifts a boat's character fails CI until the table
+  is updated in the same commit. **This machinery caught a real one on
+  its first run**: the offline integration's top speeds (6.5–6.7 kn,
+  "~85% of hull speed") are not reproducible by the shipped `tick` —
+  the wave term alone exceeds available thrust there against the real
+  waterlines; the offline copy had been calibrated on the old shared
+  11.9 m outline. Shipped truth: 5.5–5.9 kn, 71–76% of hull speed
+  (retraction + open calibration question recorded in
+  docs/reference-boats.md). Top-speed protocol note: the benchmark holds
+  course with a small P-D helm — hands-off, prop walk curls a full-power
+  run into a slow circle that reads ~0.8 kn low.
 - **Force application points create the characteristic behaviours**: lateral
   wind force acts slightly FORWARD of centre (`WIND_CENTER_OFFSET > 0`, bow
   windage → the bow falls off downwind). Tune behaviour there, not with

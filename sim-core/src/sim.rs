@@ -869,6 +869,26 @@ impl Sim {
     /// distribution (=> centre of lateral resistance, yaw damping) AND
     /// displacement. Used by the keel editor's Apply.
     pub fn new_with_design(design: &BoatDesign) -> Sim {
+        Self::build(design, true)
+    }
+
+    /// Test-only: the same boat in unbounded open water — no quay, no
+    /// breakwaters. The shipped harbour is a closed 80 × 36 m basin, which
+    /// bounds every benchmark run at ~30 m of path before the hull reaches
+    /// a wall — enough to hide whether a slow-turning boat would EVER
+    /// complete a turn, and too short for the 100 m+ coasting benchmark
+    /// (which used to be verified by re-integrating the tick() formulas
+    /// OFFLINE — a second copy of the surge math, free to drift from the
+    /// real one; retired now that this arena lets the benchmarks run
+    /// through the actual `tick`). Kept `#[cfg(test)]` so the shipped
+    /// world — and its fixed collider-insertion order (determinism rule) —
+    /// is untouched.
+    #[cfg(test)]
+    fn new_open_water(design: &BoatDesign) -> Sim {
+        Self::build(design, false)
+    }
+
+    fn build(design: &BoatDesign, harbour_walls: bool) -> Sim {
         let keel = design.keel.derive();
         let wetted_surface = wetted_surface_area(&design.keel, &design.rudder);
         let (wl_aft, wl_fwd) = waterline_extent(&design.keel);
@@ -901,14 +921,16 @@ impl Sim {
                 point![BASIN_HALF_W, QUAY_Y],
             ),
         ];
-        for (a, b) in walls {
-            colliders.insert(
-                ColliderBuilder::segment(a, b)
-                    // Rubber fender feel: grippy, nearly dead on impact.
-                    .friction(0.5)
-                    .restitution(0.1)
-                    .build(),
-            );
+        if harbour_walls {
+            for (a, b) in walls {
+                colliders.insert(
+                    ColliderBuilder::segment(a, b)
+                        // Rubber fender feel: grippy, nearly dead on impact.
+                        .friction(0.5)
+                        .restitution(0.1)
+                        .build(),
+                );
+            }
         }
 
         // The boat: one dynamic body with the convex hull collider.
@@ -1254,6 +1276,236 @@ mod tests {
     const FULL_AHEAD: InputState = InputState { throttle: 1.0, rudder: 0.0 };
     const FULL_ASTERN: InputState = InputState { throttle: -1.0, rudder: 0.0 };
 
+    // -----------------------------------------------------------------
+    // Open-water performance benchmarks
+    // -----------------------------------------------------------------
+    //
+    // These helpers are the source of the measured-performance table in
+    // docs/reference-boats.md: `measure_open_water_benchmarks` (ignored)
+    // regenerates the numbers, `open_water_benchmarks_stay_pinned` fails
+    // if a physics change moves any of them by more than its tolerance.
+    // All of them run the REAL `tick` in the wall-free arena
+    // (`new_open_water`) — the shipped basin caps any run at ~30 m of
+    // path, which is why the docs' 2026-08-04 in-basin turn table had "—"
+    // cells and why coasting used to be verified by re-integrating the
+    // formulas offline instead of through the actual Sim.
+
+    /// One knot in m/s.
+    const KN: f32 = 0.5144;
+
+    fn presets() -> [(&'static str, BoatDesign); 4] {
+        [
+            ("Hallberg-Rassy 38", BoatDesign::hallberg_rassy_38()),
+            ("O'Day 39", BoatDesign::oday_39()),
+            ("Elan Impression 394", BoatDesign::elan_impression_394()),
+            ("Alajuela 38", BoatDesign::alajuela_38()),
+        ]
+    }
+
+    /// Steady full-throttle speed (kn), from rest in calm open water,
+    /// COURSE HELD by a small deterministic P-D helmsman (helm from
+    /// heading error + yaw rate). Hands-off, prop walk curls the run into
+    /// a perpetual gentle circle and the drift drag caps speed ~0.8 kn
+    /// low — real published boat speeds are straight-line, steered
+    /// figures, so the benchmark steers too (the helm corrections at
+    /// equilibrium are a fraction of a degree; their drag is real but
+    /// negligible, and a real helmsman pays it as well). 90 s is ~25
+    /// surge time constants (τ = m·v_eq/2T ≈ 3.3 s) — fully converged.
+    fn measure_top_speed_kn(design: &BoatDesign) -> f32 {
+        let mut sim = Sim::new_open_water(design);
+        for _ in 0..(90.0 / PHYSICS_DT) as u32 {
+            let (_, h) = sim.boat_pose();
+            let (_, w) = sim.boat_vel();
+            // Positive rudder = turn to starboard = heading (CCW+) falls,
+            // so positive error/rate need positive helm to cancel.
+            let rudder = (2.0 * h + 4.0 * w).clamp(-1.0, 1.0);
+            sim.tick(&Env::CALM, &InputState { throttle: 1.0, rudder });
+        }
+        sim.boat_vel().0.length() / KN
+    }
+
+    /// Path length (m) coasting from 3 kn down through 1 kn, engine
+    /// neutral, calm open water — the benchmark that motivated the
+    /// ITTC-1957 rewrite, measured through the real `tick`.
+    fn measure_coasting_3_to_1_kn_m(design: &BoatDesign) -> f32 {
+        let mut sim = Sim::new_open_water(design);
+        sim.set_forward_speed(3.0 * KN);
+        let mut dist = 0.0f32;
+        for _ in 0..(400.0 / PHYSICS_DT) as u32 {
+            sim.tick(&Env::CALM, &InputState::NEUTRAL);
+            let v = sim.boat_vel().0.length();
+            dist += v * PHYSICS_DT;
+            if v < KN {
+                return dist;
+            }
+        }
+        panic!("still above 1 kn after 400 s / {dist:.0} m of coasting");
+    }
+
+    /// The docs' turn benchmark: 2.5 kn ahead in calm open water, full
+    /// starboard helm fed in over 2 s (slamming it stalls the blade — see
+    /// docs/reference-boats.md), engine held at `throttle`. Returns
+    /// (heading swung in degrees, path length in m, completed): the state
+    /// at the moment 90° is reached, or at the 90 s cap — by which a
+    /// rudder-only boat has coasted to a near-stop and the heading has
+    /// plateaued, so the capped angle is an asymptote, not a race cutoff.
+    fn measure_turn_90(design: &BoatDesign, throttle: f32) -> (f32, f32, bool) {
+        use std::f32::consts::{FRAC_PI_2, PI};
+        let mut sim = Sim::new_open_water(design);
+        sim.set_forward_speed(2.5 * KN);
+        let mut dist = 0.0f32;
+        let mut dpsi = 0.0f32;
+        let (_, mut last_h) = sim.boat_pose();
+        for t in 0..(90.0 / PHYSICS_DT) as u32 {
+            let ramp = (t as f32 * PHYSICS_DT / 2.0).min(1.0);
+            sim.tick(&Env::CALM, &InputState { throttle, rudder: ramp });
+            dist += sim.boat_vel().0.length() * PHYSICS_DT;
+            let (_, h) = sim.boat_pose();
+            let mut dh = h - last_h;
+            while dh > PI {
+                dh -= 2.0 * PI;
+            }
+            while dh < -PI {
+                dh += 2.0 * PI;
+            }
+            dpsi += dh;
+            last_h = h;
+            if dpsi.abs() >= FRAC_PI_2 {
+                return (dpsi.abs().to_degrees(), dist, true);
+            }
+        }
+        (dpsi.abs().to_degrees(), dist, false)
+    }
+
+    /// Measurement harness, not a check: regenerates the numbers behind
+    /// docs/reference-boats.md's "Measured performance (open water)"
+    /// table and the pins in `open_water_benchmarks_stay_pinned`. Run:
+    /// `cargo test -p harbour-sim-core --release -- --ignored --nocapture measure_open_water`
+    #[test]
+    #[ignore = "measurement harness for the docs table, not a check"]
+    fn measure_open_water_benchmarks() {
+        for (name, design) in presets() {
+            let (wl_aft, wl_fwd) = waterline_extent(&design.keel);
+            let lwl = wl_fwd - wl_aft;
+            let hull_speed_kn = 1.34 * (lwl * 3.2808).sqrt();
+            let top = measure_top_speed_kn(&design);
+            let coast = measure_coasting_3_to_1_kn_m(&design);
+            let (deg_r, dist_r, done_r) = measure_turn_90(&design, 0.0);
+            let (deg_b, dist_b, done_b) = measure_turn_90(&design, 1.0);
+            println!("{name}:");
+            println!("  LWL {lwl:.2} m, hull speed {hull_speed_kn:.1} kn (1.34·√LWL_ft)");
+            println!("  top speed {top:.2} kn ({:.0}% of hull speed)", 100.0 * top / hull_speed_kn);
+            println!("  coasting 3->1 kn: {coast:.1} m");
+            println!("  90° rudder only: {deg_r:.1}° in {dist_r:.1} m (completed: {done_r})");
+            println!("  90° with burst:  {deg_b:.1}° in {dist_b:.1} m (completed: {done_b})");
+        }
+    }
+
+    #[test]
+    fn open_water_benchmarks_stay_pinned() {
+        // The measured-performance table in docs/reference-boats.md used
+        // to be a snapshot nothing re-checked: a physics change could
+        // quietly shift a boat's whole character and the docs would
+        // silently go stale. (Found live while writing this pin: the
+        // previously quoted top speeds — 6.5/6.7/6.7/6.0 kn, from the
+        // retired offline integration — can NOT be reproduced through the
+        // real `tick`, whose wave term alone exceeds available thrust at
+        // those speeds against each preset's real waterline. The pins
+        // below are what the shipped formulas actually produce.)
+        //
+        // Values from `measure_open_water_benchmarks`, 2026-08-07.
+        // Tolerances — ±2% speeds, ±5% distances, ±3° capped headings —
+        // are wide enough for toolchain/dependency float drift, tight
+        // enough that a real behaviour change fails loudly. When a change
+        // moves a number ON PURPOSE: re-run the harness, update these
+        // pins AND the docs table in the same commit.
+        struct Pin {
+            name: &'static str,
+            design: BoatDesign,
+            top_speed_kn: f32,
+            coast_m: f32,
+            /// (deg, path m, completed) — at the 90° mark when completed,
+            /// at the protocol's 90 s cap when not.
+            rudder_only: (f32, f32, bool),
+            with_burst: (f32, f32, bool),
+        }
+        let pins = [
+            Pin {
+                name: "Hallberg-Rassy 38",
+                design: BoatDesign::hallberg_rassy_38(),
+                top_speed_kn: 5.64,
+                coast_m: 111.3,
+                rudder_only: (90.0, 23.7, true),
+                with_burst: (90.0, 18.4, true),
+            },
+            Pin {
+                name: "O'Day 39",
+                design: BoatDesign::oday_39(),
+                top_speed_kn: 5.85,
+                coast_m: 109.6,
+                rudder_only: (90.0, 18.7, true),
+                with_burst: (90.0, 16.4, true),
+            },
+            Pin {
+                name: "Elan Impression 394",
+                design: BoatDesign::elan_impression_394(),
+                top_speed_kn: 5.83,
+                coast_m: 112.6,
+                rudder_only: (90.0, 17.4, true),
+                with_burst: (90.0, 15.8, true),
+            },
+            Pin {
+                name: "Alajuela 38",
+                design: BoatDesign::alajuela_38(),
+                top_speed_kn: 5.46,
+                coast_m: 129.1,
+                // The one genuine asymptote: heading plateaus well short
+                // of 90° as the boat coasts to a stop — a property of the
+                // boat now, not of the old basin's walls.
+                rudder_only: (43.8, 67.3, false),
+                with_burst: (90.0, 24.9, true),
+            },
+        ];
+        for pin in pins {
+            let name = pin.name;
+            let top = measure_top_speed_kn(&pin.design);
+            assert!(
+                (top - pin.top_speed_kn).abs() <= 0.02 * pin.top_speed_kn,
+                "{name}: top speed {top:.2} kn, pinned {:.2} kn ±2%",
+                pin.top_speed_kn
+            );
+            let coast = measure_coasting_3_to_1_kn_m(&pin.design);
+            assert!(
+                (coast - pin.coast_m).abs() <= 0.05 * pin.coast_m,
+                "{name}: coasting 3->1 kn {coast:.1} m, pinned {:.1} m ±5%",
+                pin.coast_m
+            );
+            // Real-world anchor, not just a pin: boats this size coast
+            // past 100 m before dropping below 1 kn.
+            assert!(coast > 100.0, "{name}: coasting {coast:.0} m — real boats pass 100 m");
+            for (label, throttle, expect) in [
+                ("rudder only", 0.0, pin.rudder_only),
+                ("with burst", 1.0, pin.with_burst),
+            ] {
+                let (deg, dist, done) = measure_turn_90(&pin.design, throttle);
+                let (e_deg, e_dist, e_done) = expect;
+                assert_eq!(
+                    done, e_done,
+                    "{name} {label}: completed={done} ({deg:.1}° in {dist:.1} m), pinned \
+                     completed={e_done}"
+                );
+                assert!(
+                    (deg - e_deg).abs() <= 3.0,
+                    "{name} {label}: swung {deg:.1}°, pinned {e_deg:.1}° ±3°"
+                );
+                assert!(
+                    (dist - e_dist).abs() <= 0.05 * e_dist,
+                    "{name} {label}: {dist:.1} m of path, pinned {e_dist:.1} m ±5%"
+                );
+            }
+        }
+    }
+
     #[test]
     fn attached_flow_reproduces_jones_slender_wing_lift() {
         // A draught profile growing linearly from the bow tip to its peak
@@ -1419,31 +1671,19 @@ mod tests {
         // real small cruising sailboat losing way from ~3 kn with no
         // engine/wind/current is still above ~1 kn past 100 m — the old
         // bluff-body drag model covered that whole speed drop in ~17 m (a
-        // ~6x-too-fast stop), and full-scale offline integration of the new
-        // model against the real tick() formula lands the 3 kn -> 1 kn
-        // distance at ~99 m, matching the benchmark almost exactly (see
-        // CLAUDE.md's Rudder/hull-resistance section for that derivation).
-        //
-        // Can't run that full 100 m through the actual Sim here, though:
-        // the harbour basin is only ±40 m (BASIN_HALF_W), and the hull's
-        // own bow sticks 6 m out in front of the tracked centre, so it hits
-        // the east wall around 34 m of straight-line travel. So this
-        // checks a basin-safe slice instead — at a fixed 20 s / ~27 m in
-        // (comfortably short of the wall), the boat should still be well
-        // above 1 kn, whereas the OLD model would already have been at 1
-        // kn by 17 m and effectively stopped by here.
-        let mut sim = Sim::new();
-        sim.set_forward_speed(3.0 * 0.5144);
-        let start = sim.boat_pose().0;
-        run(&mut sim, &Env::CALM, 20.0);
-        let dist = (sim.boat_pose().0 - start).length();
-        let (v, _) = sim.boat_vel();
-        assert!(dist < 35.0, "test setup should stay clear of the basin wall, got {dist} m");
+        // ~6x-too-fast stop). This used to check a 20 s basin-safe slice
+        // (the harbour walls cap a straight run at ~34 m) and lean on an
+        // OFFLINE re-integration of the tick() formulas for the full
+        // distance; the open-water arena now runs the whole benchmark
+        // through the actual `tick` — no second copy of the surge math to
+        // drift. Per-preset distances are pinned in
+        // `open_water_benchmarks_stay_pinned`; this keeps the benchmark
+        // itself legible on the default boat.
+        let design = BoatDesign::hallberg_rassy_38();
+        let dist = measure_coasting_3_to_1_kn_m(&design);
         assert!(
-            v.length() > 2.0 * 0.5144,
-            "expected to still be well above 1 kn after 20s/{dist}m (old model would already be \
-             at ~1 kn by 17m), got {} kt",
-            v.length() / 0.5144
+            dist > 100.0,
+            "3 kn -> 1 kn in only {dist:.0} m — real boats this size coast past 100 m"
         );
     }
 
