@@ -204,7 +204,7 @@
   <script>
     // Deploy-time injected revision (build-site sed). Local dev keeps the
     // placeholder — then no cache-buster is appended.
-    const wasmRev = "4b6b101-pr-20";
+    const wasmRev = "d0b654d-pr-20";
     if (!wasmRev.startsWith("__")) {
       document.getElementById("rev-line").textContent = "build " + wasmRev;
     }
@@ -373,14 +373,14 @@
     }
 
     // --- About overlay ---------------------------------------------------
-    // Build info from the deploy-time seds (build-site): 4b6b101-pr-20
+    // Build info from the deploy-time seds (build-site): d0b654d-pr-20
     // (already in wasmRev above) is `<short-sha>` on main and
-    // `<short-sha>-pr-<n>` on a preview deploy; 2026-08-07T10:22:53Z is ISO-8601
+    // `<short-sha>-pr-<n>` on a preview deploy; 2026-08-07T21:08:40Z is ISO-8601
     // UTC, re-rendered via fmtDateTime above. Local dev keeps both
     // placeholders and shows the "dev (local build)" defaults.
     (function () {
       const repoUrl = "https://github.com/harbour-sim/harbour-sim";
-      const buildTime = "2026-08-07T10:22:53Z";
+      const buildTime = "2026-08-07T21:08:40Z";
       const aboutEl = document.getElementById("about");
       const revEl = document.getElementById("about-rev");
       const link = (href, label) => {
