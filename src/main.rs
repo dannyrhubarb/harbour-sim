@@ -76,9 +76,9 @@ fn window_conf() -> Conf {
     }
 }
 
-/// Fresh `Sim` + reset render-interpolation state, shared by the R-reset
-/// key and the keel editor's Apply — never mutate an existing `Sim` in
-/// place (determinism rule), always spawn a new one.
+/// Fresh `Sim` at the default berth + reset render-interpolation state,
+/// used by the R-reset key — never mutate an existing `Sim` in place
+/// (determinism rule), always spawn a new one.
 fn respawn(design: &BoatDesign) -> (Sim, Vec2, f32, Vec2, f32) {
     let sim = Sim::new_with_design(design);
     let (pos, heading) = sim.boat_pose();
@@ -883,9 +883,13 @@ async fn main() {
             match editor.update(canvas, layout) {
                 EditorAction::Apply => {
                     design = editor.design();
-                    (sim, prev_pos, prev_heading, cur_pos, cur_heading) = respawn(&design);
+                    sim = sim.new_continuing(&design);
+                    let (pos, heading) = sim.boat_pose();
+                    prev_pos = pos;
+                    prev_heading = heading;
+                    cur_pos = pos;
+                    cur_heading = heading;
                     accum = 0.0;
-                    input = InputState::NEUTRAL;
                     editor.active = false;
                 }
                 EditorAction::Cancel => {
