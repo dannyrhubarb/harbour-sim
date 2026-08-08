@@ -885,6 +885,7 @@ async fn main() {
                     design = editor.design();
                     (sim, prev_pos, prev_heading, cur_pos, cur_heading) = respawn(&design);
                     accum = 0.0;
+                    input = InputState::NEUTRAL;
                     editor.active = false;
                 }
                 EditorAction::Cancel => {
