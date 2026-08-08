@@ -867,9 +867,32 @@ impl Sim {
 
     /// A boat built from a full `BoatDesign`: underwater lateral-area
     /// distribution (=> centre of lateral resistance, yaw damping) AND
-    /// displacement. Used by the keel editor's Apply.
+    /// displacement. Used by the R-reset key (via `respawn`) and initial
+    /// construction; the keel editor's Apply uses `new_continuing` instead.
     pub fn new_with_design(design: &BoatDesign) -> Sim {
         Self::build(design, true)
+    }
+
+    /// A fresh `Sim` with a new design, but CONTINUING at the old sim's
+    /// pose, velocity, and engine spool — used by the keel editor's Apply
+    /// so the user sees the hydrodynamic effect of a keel change in place,
+    /// instead of being teleported back to the berth. Still a fresh `Sim`
+    /// (determinism rule: never mutate coefficients in place), just one
+    /// whose initial conditions are transplanted from the predecessor.
+    pub fn new_continuing(&self, design: &BoatDesign) -> Sim {
+        let (pos, heading) = self.boat_pose();
+        let (vel, angvel) = self.boat_vel();
+        let engine = self.engine;
+        let mut sim = Self::build(design, true);
+        {
+            let rb = &mut sim.bodies[sim.boat];
+            rb.set_translation(vector![pos.x, pos.y], true);
+            rb.set_rotation(nalgebra::UnitComplex::new(heading), true);
+            rb.set_linvel(vector![vel.x, vel.y], true);
+            rb.set_angvel(angvel, true);
+        }
+        sim.engine = engine;
+        sim
     }
 
     /// Test-only: the same boat in unbounded open water — no quay, no
@@ -2213,5 +2236,44 @@ mod tests {
             assert!(cf.is_finite(), "expected finite Cf at Re = {re}, got {cf}");
             assert!(cf > 0.0 && cf < 0.01, "clamped Cf should be small, got {cf} at Re = {re}");
         }
+    }
+
+    #[test]
+    fn new_continuing_preserves_state_but_updates_coefficients() {
+        // Set up a sim with non-default pose, velocity, yaw rate, and
+        // engine spool, then continue into a different design — the
+        // kinematic state must survive while the keel coefficients change.
+        let design_a = BoatDesign::hallberg_rassy_38();
+        let design_b = BoatDesign::oday_39();
+        let mut sim = Sim::new_open_water(&design_a);
+        sim.set_pose(5.0, -10.0, 0.5);
+        sim.set_forward_speed(2.0);
+        sim.set_yaw_rate(0.1);
+        // Spool the engine partway by running a few ticks at full ahead.
+        run_input(&mut sim, &Env::CALM, &FULL_AHEAD, 0.2);
+        // Snapshot the state AFTER those ticks (pose drifted a bit, engine
+        // spooled partway — that's the state we want transplanted).
+        let (pos, heading) = sim.boat_pose();
+        let (vel, angvel) = sim.boat_vel();
+        let engine = sim.engine();
+        assert!(engine > 0.0, "engine should have spooled up");
+        let keel_a = sim.keel();
+
+        let sim2 = sim.new_continuing(&design_b);
+        let (pos2, heading2) = sim2.boat_pose();
+        let (vel2, angvel2) = sim2.boat_vel();
+
+        // Kinematic state preserved exactly.
+        assert_eq!(pos, pos2, "position must survive");
+        assert_eq!(heading, heading2, "heading must survive");
+        assert_eq!(vel, vel2, "velocity must survive");
+        assert_eq!(angvel, angvel2, "yaw rate must survive");
+        assert_eq!(engine, sim2.engine(), "engine spool must survive");
+
+        // Keel coefficients must reflect the NEW design.
+        let keel_b = sim2.keel();
+        assert_ne!(keel_a, keel_b, "keel coefficients must change with the new design");
+        let expected = design_b.keel.derive();
+        assert_eq!(keel_b, expected, "keel must match the new design's derived values");
     }
 }
